@@ -11,7 +11,8 @@ const ELK_CONFIG = {
     protocol: process.env.ELK_MCP_PROTOCOL || 'proxy',
     
     // mcp-proxy 模式配置（推薦）
-    proxyCommand: process.env.HOME + '/.local/bin/mcp-proxy',
+    // 修復：使用固定路徑，避免 HOME 環境變數在 root 環境下指向錯誤路徑
+    proxyCommand: process.env.MCP_PROXY_PATH || '/Users/peter/.local/bin/mcp-proxy',
     proxyArgs: [
       '--transport=streamablehttp',
       `http://10.168.10.250:8080/mcp`

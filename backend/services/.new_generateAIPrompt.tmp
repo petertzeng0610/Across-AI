@@ -1,0 +1,235 @@
+  // 生成 AI 分析 Prompt（基於真實資料 - 升級版）
+  generateAIPrompt(analysisData) {
+    const {
+      sqlInjection,
+      xssAttacks,
+      rceAttacks,
+      botTraffic,
+      pathTraversal,
+      abnormalUA,
+      geoAnalysis,
+      assetAnalysis,
+      totalEvents,
+      timeRange
+    } = analysisData;
+
+    // ============================
+    // 🔥 關鍵改變：動態構建攻擊統計
+    // ============================
+    
+    const attackSections = [];
+
+    // 只添加檢測次數 > 0 的攻擊類型
+    if (sqlInjection.count > 0) {
+      attackSections.push({
+        type: 'SQL 注入攻擊',
+        data: sqlInjection,
+        description: 'WAFSQLiAttackScore <= 50 或 SecurityRule 包含 "sql"'
+      });
+    }
+
+    if (xssAttacks.count > 0) {
+      attackSections.push({
+        type: 'XSS 跨站腳本攻擊',
+        data: xssAttacks,
+        description: 'WAFXSSAttackScore <= 50 或 SecurityRule 包含 "xss"'
+      });
+    }
+
+    if (rceAttacks.count > 0) {
+      attackSections.push({
+        type: 'RCE 遠程代碼執行攻擊',
+        data: rceAttacks,
+        description: 'WAFRCEAttackScore <= 50 或 SecurityRule 包含 "rce"'
+      });
+    }
+
+    if (botTraffic.count > 0) {
+      attackSections.push({
+        type: '惡意機器人流量',
+        data: botTraffic,
+        description: 'BotScore < 30 或 BotTags 包含 "malicious"'
+      });
+    }
+
+    if (pathTraversal.count > 0) {
+      attackSections.push({
+        type: '路徑遍歷攻擊',
+        data: pathTraversal,
+        description: 'URI 包含 "../", "..\\\\", "%2e%2e" 或敏感檔案路徑'
+      });
+    }
+
+    if (abnormalUA.count > 0) {
+      attackSections.push({
+        type: '異常 User-Agent',
+        data: abnormalUA,
+        description: 'User-Agent 長度異常或包含掃描工具特徵'
+      });
+    }
+
+    // ============================
+    // 構建攻擊統計文字
+    // ============================
+    
+    let attackStatisticsText = '';
+    
+    if (attackSections.length === 0) {
+      attackStatisticsText = `
+**未檢測到任何安全威脅**
+
+在指定時間範圍內，經過 Cloudflare WAF 的完整分析後，未檢測到任何 SQL 注入、XSS、RCE、路徑遍歷攻擊或異常機器人流量。所有請求均通過安全檢查。
+
+⚠️ **重要**：由於沒有檢測到任何攻擊，請輸出空的 risks 陣列：
+\`\`\`json
+{
+  "risks": []
+}
+\`\`\`
+`;
+    } else {
+      attackStatisticsText = attackSections.map((section, index) => {
+        const { type, data, description } = section;
+        
+        return `
+${index + 1}. **${type}**
+   - 檢測方式: ${description}
+   - 檢測次數: ${data.count}
+   ${data.highRisk !== undefined ? `- 高風險 (WAF分數 1-20): ${data.highRisk}` : ''}
+   ${data.avgScore !== undefined && data.avgScore !== 'N/A' ? `- 平均 WAF 分數: ${data.avgScore}` : ''}
+   - 受影響資產: ${data.affectedAssets}
+   - Top 5 來源IP: ${data.topIPs ? data.topIPs.slice(0, 5).map(ip => `${ip.item} (${ip.count}次)`).join(', ') : '無'}
+   - Top 5 來源國家: ${data.topCountries ? data.topCountries.map(c => `${c.item} (${c.count}次)`).join(', ') : '無'}
+   ${data.topTargets ? `- Top 5 攻擊目標: ${data.topTargets.slice(0, 5).map(t => `${t.item} (${t.count}次)`).join(', ')}` : ''}
+   ${data.sensitiveFiles ? `- 敏感檔案探測: ${data.sensitiveFiles.slice(0, 5).join(', ')}` : ''}
+`.trim();
+      }).join('\n\n');
+    }
+
+    // ============================
+    // 生成完整的 Prompt 模板
+    // ============================
+    
+    const promptTemplate = `
+你是一位資深的網路安全分析專家，專精於 Cloudflare WAF 日誌分析和威脅識別。
+
+### 【任務說明】
+
+請根據以下 Cloudflare WAF 日誌數據，**自動識別並分類所有攻擊類型**，生成完整的風險評估報告。
+
+**重要：請不要使用預設的攻擊類型清單。所有攻擊類型都應該從日誌數據中自動識別。**
+
+---
+
+### 【資料來源】
+
+- **索引名稱**: ${this.elkConfig.elasticsearch.index}
+- **時間範圍**: ${timeRange.start} ~ ${timeRange.end}
+- **總日誌數**: ${totalEvents.toLocaleString()} 筆
+- **分析時間**: ${new Date().toISOString()}
+
+---
+
+### 【Cloudflare WAF 攻擊分數系統（官方標準）】
+
+**分數範圍**: 1-99（分數越低越危險）
+
+- **1-20**: Attack（攻擊） - 幾乎確定是惡意攻擊
+- **21-50**: Likely Attack（可能攻擊） - 可能是攻擊，但此範圍容易誤報
+- **51-80**: Likely Clean（可能正常） - 可能是正常流量
+- **81-99**: Clean（正常） - 很可能是正常流量
+- **100 或 0**: Unscored（未評分） - WAF 沒有評分此請求
+
+**重要規則**:
+- 分數 0 或 100 = 未評分，**不代表攻擊**，已自動排除
+- 只有分數 1-99 才是有效的評分結果
+- 所有內部 Cloudflare 端點（\`/cdn-cgi/*\`）已自動過濾
+
+---
+
+### 【攻擊統計（基於真實 Cloudflare 日誌）】
+
+${attackStatisticsText}
+
+---
+
+### 【地理與資產分析】
+
+- **Top 10 攻擊來源國家**: ${geoAnalysis.topCountries.slice(0, 10).map(c => `${c.item} (${c.count}次)`).join(', ') || '無'}
+- **Top 10 攻擊來源IP**: ${geoAnalysis.topIPs.slice(0, 10).map(ip => `${ip.item} (${ip.count}次)`).join(', ') || '無'}
+- **受影響資產總數**: ${assetAnalysis.totalAssets}
+- **Top 5 被攻擊資產**: ${assetAnalysis.topAssets.slice(0, 5).map(a => `${a.item} (${a.count}次)`).join(', ') || '無'}
+
+---
+
+### 【OWASP TOP 10 2021 分類參考】
+
+在識別攻擊類型時，請參考 OWASP TOP 10 2021 分類：
+
+1. **A01:2021 – Broken Access Control** (存取控制失效)
+2. **A02:2021 – Cryptographic Failures** (加密機制失效)
+3. **A03:2021 – Injection** (注入攻擊) ← SQL 注入、XSS、命令注入
+4. **A04:2021 – Insecure Design** (不安全設計)
+5. **A05:2021 – Security Misconfiguration** (安全配置錯誤)
+6. **A06:2021 – Vulnerable and Outdated Components** (危險或過舊的元件)
+7. **A07:2021 – Identification and Authentication Failures** (認證及驗證機制失效)
+8. **A08:2021 – Software and Data Integrity Failures** (軟體及資料完整性失效)
+9. **A09:2021 – Security Logging and Monitoring Failures** (資安記錄及監控失效)
+10. **A10:2021 – Server-Side Request Forgery (SSRF)** (伺服器端請求偽造)
+
+---
+
+### 【輸出格式要求】
+
+請生成 **嚴格的 JSON 格式** 風險報告：
+
+\`\`\`json
+{
+  "risks": [
+    {
+      "id": "攻擊類型-唯一識別碼-時間戳",
+      "title": "攻擊標題（簡潔明確）",
+      "severity": "critical | high | medium | low",
+      "openIssues": 檢測次數（數字）,
+      "resolvedIssues": 0,
+      "affectedAssets": 受影響的唯一主機名稱數量（數字）,
+      "tags": ["Exploit In Wild", "Internet Exposed", "Confirmed Exploitable"],
+      "description": "詳細描述（200-300字）",
+      "aiInsight": "AI 深度分析（100-150字），必須包含具體數字、WAF分數、來源、目標、建議",
+      "createdDate": "Apr 8, 2025",
+      "updatedDate": "Apr 9, 2025",
+      "exploitInWild": true | false,
+      "internetExposed": true,
+      "confirmedExploitable": true | false,
+      "cveId": "CVE-XXXX-XXXX（可選）",
+      "recommendations": [
+        {
+          "title": "建議標題",
+          "description": "建議描述（150-200字）",
+          "priority": "high | medium | low"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+---
+
+### 【輸出規則】
+
+1. ⚠️ **關鍵規則**：只生成上面「攻擊統計」中明確列出的攻擊類型
+2. ⚠️ **絕對禁止**：不要生成任何在「攻擊統計」中未列出的攻擊類型
+3. ⚠️ **嚴格要求**：如果某個攻擊類型的檢測次數為 0，該類型不會出現在「攻擊統計」中，也絕對不要在 risks 中生成
+4. 每個風險至少提供 2-3 個具體建議
+5. aiInsight 必須包含具體數字、WAF 分數、Top 來源、Top 目標
+6. 描述要具體提到檢測到的攻擊特徵和 OWASP 分類
+
+---
+
+請以繁體中文回答，**務必輸出純 JSON 格式**，不要有 markdown 或其他格式符號。
+`;
+
+    return promptTemplate.trim();
+  }
+

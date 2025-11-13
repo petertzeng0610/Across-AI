@@ -230,6 +230,22 @@ class ElkMCPClient {
         if (ELK_CONFIG.mcp.protocol === 'proxy') {
           // 使用 mcp-proxy 橋接 HTTP 到 stdio
           console.log('使用 mcp-proxy 橋接到 HTTP MCP Server...');
+          console.log(`mcp-proxy 路徑: ${ELK_CONFIG.mcp.proxyCommand}`);
+          console.log(`mcp-proxy 參數: ${ELK_CONFIG.mcp.proxyArgs.join(' ')}`);
+          
+          // 檢查 mcp-proxy 是否存在
+          const fs = require('fs');
+          if (!fs.existsSync(ELK_CONFIG.mcp.proxyCommand)) {
+            throw new Error(
+              `mcp-proxy 不存在於路徑: ${ELK_CONFIG.mcp.proxyCommand}\n` +
+              `請確認：\n` +
+              `1. mcp-proxy 已正確安裝\n` +
+              `2. 路徑正確（當前 PATH: ${process.env.PATH}）\n` +
+              `3. 不使用 sudo/root 身份運行後端\n` +
+              `4. 或在 .env 中設定 ELK_MCP_PROTOCOL=http 使用 HTTP 模式`
+            );
+          }
+          
           transport = new StdioClientTransport({
             command: ELK_CONFIG.mcp.proxyCommand,
             args: ELK_CONFIG.mcp.proxyArgs

@@ -1,4 +1,4 @@
-// backend/index.js
+ // backend/index.js
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -7,14 +7,10 @@ const readline = require('readline');
 const { elkMCPClient } = require('./services/elkMCPClient');
 const { ELK_CONFIG, OWASP_REFERENCES, identifyOWASPType } = require('./config/elkConfig');
 const { CLOUDFLARE_FIELD_MAPPING, generateAIFieldReference } = require('../cloudflare-field-mapping');
-const TrendAnalysisService = require('./services/trendAnalysisService');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// 初始化趨勢分析服務
-const trendAnalysisService = new TrendAnalysisService();
 
 // --- 常數設定 ---
 const LOG_FILE_PATH = '../CF-http_log.txt';
@@ -251,42 +247,6 @@ const AVAILABLE_MODELS = [
 app.get('/api/models', (_req, res) => {
   res.json(AVAILABLE_MODELS);
 });
-
-
-
-// 新增：觸發日誌分析的端點
-app.post('/api/analyze-log', async (req, res) => {
-  console.log('▶️ 收到日誌分析請求...');
-
-  if (!fs.existsSync(LOG_FILE_PATH)) {
-    console.error('❌ 錯誤：找不到日誌檔案！');
-    return res.status(500).json({ error: '找不到日誌檔案' });
-  }
-
-  try {
-    const analysisResult = await processLogFile(req.body);
-    res.json(analysisResult);
-  } catch (error) {
-    console.error('❌ 在日誌分析過程中發生錯誤:', error);
-    
-    // 提供更友善的錯誤訊息
-    let errorMessage = '日誌分析失敗';
-    if (error.status === 503) {
-      errorMessage = 'AI 服務暫時過載，請稍後再試';
-    } else if (error.status === 400) {
-      errorMessage = 'API Key 無效，請檢查您的 Gemini API Key';
-    } else if (error.status === 429) {
-      errorMessage = 'API 使用量超過限制，請稍後再試';
-    }
-    
-    res.status(500).json({ 
-      error: errorMessage, 
-      details: error.message,
-      status: error.status 
-    });
-  }
-});
-
 
 // 原始 AI 分析端點 (現在主要由後端內部呼叫)
 app.post('/api/analyze', async (req, res) => {
@@ -1492,37 +1452,6 @@ app.get('/api/elk/test-connection', async (req, res) => {
   }
 });
 
-// ELK 資料來源分析端點
-app.post('/api/analyze-elk-log', async (req, res) => {
-  try {
-    const { apiKey, model, timeRange = '1h', dataSource = 'file' } = req.body;
-    
-    if (!apiKey) {
-      return res.status(400).json({ error: 'API key is required' });
-    }
-
-    let analysisResult;
-
-    if (dataSource === 'elk') {
-      // 使用 ELK 作為資料來源
-      console.log('🔍 使用 ELK 資料來源進行分析...');
-      analysisResult = await processELKLogs({ apiKey, model, timeRange });
-    } else {
-      // 使用檔案作為資料來源（保持向後相容）
-      console.log('📁 使用檔案資料來源進行分析...');
-      analysisResult = await processLogFile({ apiKey, model });
-    }
-
-    res.json(analysisResult);
-  } catch (error) {
-    console.error('分析錯誤:', error);
-    res.status(500).json({ 
-      error: '分析失敗', 
-      details: error.message 
-    });
-  }
-});
-
 // 獲取 ELK 統計資料
 app.get('/api/elk/stats/:timeRange', async (req, res) => {
   try {
@@ -1550,339 +1479,6 @@ app.get('/api/elk/stats', async (req, res) => {
     });
   }
 });
-
-// === 攻擊趨勢對比分析 API ===
-
-// 載入趨勢對比資料
-app.post('/api/load-trend-comparison', async (req, res) => {
-  const { timeRange } = req.body;
-  
-  try {
-    console.log(`🔍 開始載入趨勢對比資料 (時間範圍: ${timeRange})...`);
-    
-    // 計算對比時間區間
-    const periods = trendAnalysisService.calculateComparisonPeriods(timeRange);
-    
-    console.log(`當前時期: ${periods.current.start.toISOString()} - ${periods.current.end.toISOString()}`);
-    console.log(`上一時期: ${periods.previous.start.toISOString()} - ${periods.previous.end.toISOString()}`);
-
-    // 查詢實際ELK資料並分割為兩個時期
-    const allLogData = await queryActualELKData(timeRange);
-    
-    if (allLogData.length === 0) {
-      throw new Error('未找到任何日誌資料，請檢查ELK連接或數據範圍');
-    }
-
-    // 將資料按時間排序並分割為兩個相等時期
-    const sortedData = allLogData.sort((a, b) => 
-      new Date(a.EdgeStartTimestamp || a.timestamp) - new Date(b.EdgeStartTimestamp || b.timestamp)
-    );
-    
-    const midpoint = Math.floor(sortedData.length / 2);
-    const previousData = sortedData.slice(0, midpoint);
-    const currentData = sortedData.slice(midpoint);
-    
-    // 計算實際時間範圍
-    const actualPeriods = calculateActualPeriods(previousData, currentData, timeRange);
-
-    console.log(`✅ 數據分割完成:`);
-    console.log(`上一時期: ${previousData.length} 筆記錄 (${actualPeriods.previous.start} - ${actualPeriods.previous.end})`);
-    console.log(`當前時期: ${currentData.length} 筆記錄 (${actualPeriods.current.start} - ${actualPeriods.current.end})`);
-
-    // 基於ClientRequestBytes生成流量統計
-    const currentAnalysis = trendAnalysisService.analyzePeriodTraffic(currentData, actualPeriods.current);
-    const previousAnalysis = trendAnalysisService.analyzePeriodTraffic(previousData, actualPeriods.previous);
-    
-    // 生成單一對比圖表資料
-    const comparisonChart = trendAnalysisService.generateTrafficComparisonChart(
-      currentAnalysis, 
-      previousAnalysis, 
-      actualPeriods
-    );
-
-    // 計算對比統計
-    const statistics = trendAnalysisService.calculateComparisonStats(currentAnalysis, previousAnalysis);
-
-    console.log(`✅ 趨勢對比資料載入完成`);
-    console.log(`當前時期: ${currentAnalysis.totalRequests} 次請求, ${trendAnalysisService.formatBytes(currentAnalysis.totalRequestTraffic)} 流量`);
-    console.log(`上一時期: ${previousAnalysis.totalRequests} 次請求, ${trendAnalysisService.formatBytes(previousAnalysis.totalRequestTraffic)} 流量`);
-
-    res.json({
-      success: true,
-      periods: actualPeriods,
-      currentPeriod: currentAnalysis,
-      previousPeriod: previousAnalysis,
-      comparisonChart,
-      statistics
-    });
-
-  } catch (error) {
-    console.error('❌ 趨勢資料載入失敗:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: '趨勢對比資料載入失敗'
-    });
-  }
-});
-
-// AI 趨勢分析
-app.post('/api/analyze-attack-trends', async (req, res) => {
-  const { apiKey, model, currentData, previousData, periods } = req.body;
-  
-  try {
-    console.log('🤖 開始 AI 趨勢分析...');
-    
-    if (!apiKey) {
-      throw new Error('請先在「AI分析設定」頁面設定 Gemini API Key');
-    }
-    
-    if (!currentData || !previousData) {
-      throw new Error('請先載入趨勢圖表資料');
-    }
-
-    // 建構AI分析提示詞
-    const analysisPrompt = trendAnalysisService.buildTrendAnalysisPrompt(currentData, previousData, periods);
-    
-    console.log('📝 生成 AI 分析提示詞...');
-    
-    // 調用Gemini AI分析
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const geminiModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-pro' });
-    
-    const result = await geminiModel.generateContent(analysisPrompt);
-    const response = await result.response;
-    const trendAnalysis = response.text();
-
-    console.log('✅ AI 趨勢分析完成');
-
-    res.json({
-      success: true,
-      trendAnalysis,
-      metadata: {
-        analysisId: generateAnalysisId(),
-        timestamp: new Date().toISOString(),
-        model: model || 'gemini-1.5-pro',
-        isAIGenerated: true,
-        analysisType: 'traffic_trend_comparison'
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ AI趨勢分析失敗:', error);
-    res.status(500).json({ 
-      error: error.message,
-      details: 'AI趨勢分析失敗'
-    });
-  }
-});
-
-// 查詢實際ELK資料（基於現有數據範圍）
-async function queryActualELKData(timeRange, retryCount = 0) {
-  const maxRetries = 2;
-  
-  try {
-    console.log(`🔍 查詢實際ELK資料 (範圍: ${timeRange}, 嘗試: ${retryCount + 1}/${maxRetries + 1})...`);
-    
-    // 使用現有的elkMCPClient查詢，它會自動查詢最新可用數據
-    // 根據時間範圍調整查詢大小，確保有足夠數據進行對比
-    let querySize = getQuerySizeByTimeRange(timeRange);
-    
-    // 如果是重試，降低查詢大小
-    if (retryCount > 0) {
-      querySize = Math.floor(querySize * 0.7); // 減少30%
-      console.log(`🔄 重試查詢，降低查詢大小至: ${querySize}`);
-    }
-    
-    // 臨時修改ELK查詢大小
-    const originalQuery = elkMCPClient.buildElasticsearchQuery;
-    elkMCPClient.buildElasticsearchQuery = function(range, filters) {
-      const query = originalQuery.call(this, range, filters);
-      query.size = querySize; // 調整查詢數量
-      return query;
-    };
-    
-    const elkData = await elkMCPClient.queryElasticsearch('auto');
-    
-    // 恢復原始查詢方法
-    elkMCPClient.buildElasticsearchQuery = originalQuery;
-    
-    if (!elkData.hits || elkData.hits.length === 0) {
-      console.log('⚠️ 未找到ELK日誌資料');
-      return [];
-    }
-    
-    console.log(`📊 成功獲取 ${elkData.hits.length} 筆實際日誌記錄`);
-    
-    // 轉換ELK資料格式
-    const logEntries = elkData.hits.map(hit => convertELKToLogEntry(hit.source));
-    
-    // 按時間排序（最舊到最新）
-    logEntries.sort((a, b) => 
-      new Date(a.EdgeStartTimestamp || a.timestamp) - new Date(b.EdgeStartTimestamp || b.timestamp)
-    );
-    
-    console.log(`✅ 數據時間範圍: ${logEntries[0]?.EdgeStartTimestamp} - ${logEntries[logEntries.length-1]?.EdgeStartTimestamp}`);
-    
-    return logEntries;
-    
-  } catch (error) {
-    console.error(`❌ 查詢實際ELK資料失敗 (嘗試 ${retryCount + 1}):`, error.message);
-    
-    // 如果是超時錯誤且還有重試機會，進行重試
-    if ((error.message.includes('timeout') || error.message.includes('timed out')) && retryCount < maxRetries) {
-      console.log(`⏳ 檢測到超時錯誤，${2}秒後重試...`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      return queryActualELKData(timeRange, retryCount + 1);
-    }
-    
-    // 提供更友好的錯誤信息
-    if (error.message.includes('timeout') || error.message.includes('timed out')) {
-      throw new Error(`查詢超時：${timeRange} 範圍的數據量過大，請嘗試較小的時間範圍（如1天或3天）`);
-    }
-    
-    throw error;
-  }
-}
-
-// 根據時間範圍獲取查詢大小
-function getQuerySizeByTimeRange(timeRange) {
-  const sizeMap = {
-    '1h': 2000,
-    '6h': 3000,
-    '1d': 4000,
-    '3d': 5000,
-    '7d': 6000,  // 降低7天查詢大小，避免超時
-    '30d': 8000  // 降低30天查詢大小
-  };
-  console.log(`📊 時間範圍 ${timeRange} 對應查詢大小: ${sizeMap[timeRange] || 6000}`);
-  return sizeMap[timeRange] || 6000;
-}
-
-// 計算實際時間範圍
-function calculateActualPeriods(previousData, currentData, timeRange) {
-  const getTimeRange = (data) => {
-    if (data.length === 0) return { start: null, end: null };
-    
-    const timestamps = data.map(entry => new Date(entry.EdgeStartTimestamp || entry.timestamp));
-    const start = new Date(Math.min(...timestamps));
-    const end = new Date(Math.max(...timestamps));
-    
-    return { start, end };
-  };
-  
-  const previousRange = getTimeRange(previousData);
-  const currentRange = getTimeRange(currentData);
-  
-  const formatDateRange = (start, end) => {
-    if (!start || !end) return 'N/A';
-    
-    const formatDate = (date) => {
-      return date.toLocaleDateString('zh-TW', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    };
-    
-    return `${formatDate(start)} - ${formatDate(end)}`;
-  };
-  
-  return {
-    current: {
-      start: currentRange.start,
-      end: currentRange.end,
-      label: `當前時期 (${formatDateRange(currentRange.start, currentRange.end)})`
-    },
-    previous: {
-      start: previousRange.start,
-      end: previousRange.end,
-      label: `上一時期 (${formatDateRange(previousRange.start, previousRange.end)})`
-    }
-  };
-}
-
-// 查詢特定時期的ELK資料（舊方法，保留備用）
-async function queryELKPeriodData(period) {
-  try {
-    console.log(`🔍 查詢時期資料: ${period.start.toISOString()} - ${period.end.toISOString()}`);
-    
-    // 確保 ELK 連接已建立
-    await elkMCPClient.ensureConnection();
-    
-    // 建構時間範圍查詢
-    const query = {
-      query: {
-        range: {
-          "@timestamp": {
-            gte: period.start.toISOString(),
-            lte: period.end.toISOString()
-          }
-        }
-      },
-      sort: [{ "@timestamp": { order: "asc" } }],
-      size: 10000 // 根據需要調整
-    };
-
-    console.log('📊 執行自定義時間範圍查詢...');
-    console.log('查詢時間範圍:', period.start.toISOString(), 'to', period.end.toISOString());
-    console.log('索引:', ELK_CONFIG.elasticsearch.index);
-
-    // 使用確保連接後的 elkMCPClient 查詢
-    const result = await elkMCPClient.client.callTool({
-      name: 'search',
-      arguments: {
-        index: ELK_CONFIG.elasticsearch.index,
-        query_body: query
-      }
-    });
-
-    if (result.isError) {
-      throw new Error(`ELK查詢失敗: ${result.content[0]?.text || 'Unknown error'}`);
-    }
-
-    // 處理 MCP Server 的回應 (複製現有邏輯)
-    const responseText = result.content[0]?.text || '';
-    console.log('MCP Server 回應 (摘要):', responseText.substring(0, 200) + '...');
-    
-    // 檢查是否有第二個 content（實際的資料）
-    const dataText = result.content[1]?.text || responseText;
-    console.log('實際資料長度:', dataText.length, '前 100 字元:', dataText.substring(0, 100));
-    
-    let records;
-    
-    try {
-      // 首先嘗試解析為記錄陣列（最常見的情況）
-      records = JSON.parse(dataText);
-      if (Array.isArray(records)) {
-        console.log(`✅ 解析為記錄陣列，找到 ${records.length} 筆記錄`);
-        return records.map(record => convertELKToLogEntry(record));
-      } else {
-        // 如果不是陣列，可能是標準 Elasticsearch 格式
-        console.log('⚠️ 回應不是陣列格式，嘗試提取hits');
-        const hits = records.hits?.hits || [];
-        console.log(`✅ 從hits中找到 ${hits.length} 筆記錄`);
-        return hits.map(hit => convertELKToLogEntry(hit._source));
-      }
-    } catch (e) {
-      // 如果都無法解析，嘗試從摘要中提取數字
-      console.log('⚠️ 無法解析JSON格式，嘗試解析摘要');
-      const match = responseText.match(/Total results: (\d+)/);
-      if (match) {
-        const totalCount = parseInt(match[1]);
-        console.log(`從摘要中發現 ${totalCount} 筆記錄，但無法解析詳細資料`);
-        // 返回空陣列但記錄數量
-        return [];
-      }
-      console.log('⚠️ 無法解析任何資料，回傳空陣列');
-      return [];
-    }
-    
-  } catch (error) {
-    console.error(`❌ 查詢時期資料失敗:`, error);
-    throw error;
-  }
-}
 
 // 調試端點：檢查時間分組問題
 app.get('/api/debug/time-grouping', async (req, res) => {
@@ -1930,58 +1526,129 @@ app.get('/api/debug/time-grouping', async (req, res) => {
   }
 });
 
-// 新增：攻擊來源統計API
-app.post('/api/attack-source-stats', async (req, res) => {
+// 新增：Cloudflare WAF 風險分析 API
+app.post('/api/analyze-waf-risks-cloudflare', async (req, res) => {
   try {
-    const { apiKey, model, dataSource = 'file', timeRange = 'auto' } = req.body;
+    const { apiKey, model = 'gemini-2.0-flash-exp', timeRange = '24h', aiProvider = 'gemini' } = req.body;
     
-    if (!apiKey) {
-      return res.status(400).json({ error: '請先設定 Gemini API Key' });
+    // 如果使用 Ollama，不需要 API Key
+    if (aiProvider !== 'ollama' && !apiKey) {
+      return res.status(400).json({ error: '請先設定 Gemini API Key 或使用 Ollama' });
     }
 
-    console.log(`📊 開始載入攻擊來源統計 (資料來源: ${dataSource})`);
-    let analysisResult;
+    console.log(`\n🔍 ===== 開始 Cloudflare WAF 風險分析 API =====`);
+    console.log(`📅 時間範圍: ${timeRange}`);
+    console.log(`🤖 AI 提供者: ${aiProvider}`);
+    console.log(`🤖 AI 模型: ${model}`);
     
-    if (dataSource === 'elk') {
-      analysisResult = await processELKLogs({ apiKey, model, timeRange });
-    } else {
-      analysisResult = await processLogFile({ apiKey, model });
-    }
-
-    // 提取攻擊來源統計資料
-    const attackData = analysisResult.attackData;
-    if (!attackData) {
-      return res.json({
-        topIPs: [],
-        topCountries: [],
-        topURIs: [],
-        topDomains: [],
-        httpStatusStats: [],
+    // Step 1: 建立 CloudflareWAFRiskService 實例
+    const CloudflareWAFRiskService = require('./services/cloudflareWAFRiskService');
+    const wafService = new CloudflareWAFRiskService();
+    
+    // Step 2: 透過 ELK MCP 分析 Cloudflare WAF 資料
+    console.log('\n⭐ Step 1: 透過 ELK MCP 分析 Cloudflare 日誌...');
+    const analysisData = await wafService.analyzeCloudflareWAF(timeRange);
+    
+    console.log(`✅ 分析完成，總事件數: ${analysisData.totalEvents}`);
+    
+    // Step 3: 生成 AI Prompt
+    console.log('\n⭐ Step 2: 生成 AI 分析 Prompt...');
+    const aiPrompt = wafService.generateAIPrompt(analysisData);
+    console.log(`✅ Prompt 長度: ${aiPrompt.length} 字元`);
+    
+    // Step 4: 呼叫 AI 進行分析（支援 Gemini 和 Ollama）
+    console.log(`\n⭐ Step 3: 呼叫 ${aiProvider === 'ollama' ? 'Ollama' : 'Gemini'} AI 分析...`);
+    
+    let responseText;
+    
+    if (aiProvider === 'ollama') {
+      // 使用 Ollama
+      const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+      const ollamaModel = model || 'gemma3:4b';  // ✅ 改用 gemma3:4b
+      
+      console.log(`🦙 Ollama URL: ${ollamaUrl}`);
+      console.log(`🦙 Ollama 模型: ${ollamaModel}`);
+      
+      const ollamaResponse = await fetch(`${ollamaUrl}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: ollamaModel,
+          prompt: aiPrompt,
+          stream: false,
+          options: {
+            temperature: 0.7,
+            num_predict: 4096
+          }
+        })
       });
+      
+      if (!ollamaResponse.ok) {
+        throw new Error(`Ollama API 錯誤: ${ollamaResponse.status}`);
+      }
+      
+      const ollamaData = await ollamaResponse.json();
+      responseText = ollamaData.response;
+      console.log(`✅ Ollama 回應長度: ${responseText.length} 字元`);
+      
+    } else {
+      // 使用 Gemini
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const geminiModel = genAI.getGenerativeModel({ model });
+      const result = await geminiModel.generateContent(aiPrompt);
+      responseText = result.response.text();
+      console.log(`✅ Gemini 回應長度: ${responseText.length} 字元`);
     }
-
-    // 處理 HTTP 狀態碼統計
-    const globalStats = analysisResult.globalStats || {};
-    const httpStatusStats = globalStats.httpStatusCounts ? 
-      Array.from(globalStats.httpStatusCounts.entries())
-        .map(([status, count]) => ({ status, count }))
-        .sort((a, b) => b.count - a.count)
-      : [];
-
+    
+    // Step 5: 解析 AI 回應（JSON 格式）
+    console.log('\n⭐ Step 4: 解析 AI 回應...');
+    let aiAnalysis;
+    
+    try {
+      // 嘗試直接解析 JSON
+      aiAnalysis = JSON.parse(responseText);
+      console.log(`✅ 成功解析 JSON，風險數量: ${aiAnalysis.risks?.length || 0}`);
+    } catch (parseError) {
+      console.log('⚠️ JSON 解析失敗，嘗試提取 JSON...');
+      
+      // 嘗試從 markdown code block 中提取
+      const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/) || 
+                        responseText.match(/```\s*([\s\S]*?)\s*```/);
+      
+      if (jsonMatch) {
+        try {
+          aiAnalysis = JSON.parse(jsonMatch[1]);
+          console.log(`✅ 從 markdown 中成功解析，風險數量: ${aiAnalysis.risks?.length || 0}`);
+        } catch (e) {
+          console.log('❌ 無法解析 AI 回應，使用 Fallback 資料');
+          aiAnalysis = wafService.generateFallbackRisks(analysisData);
+        }
+      } else {
+        console.log('❌ 無法找到 JSON 格式，使用 Fallback 資料');
+        aiAnalysis = wafService.generateFallbackRisks(analysisData);
+      }
+    }
+    
+    console.log('\n✅ ===== Cloudflare WAF 風險分析完成 =====\n');
+    
+    // 返回結果
     res.json({
-      topIPs: attackData.topIPs || [],
-      topCountries: attackData.topCountries || [],
-      topURIs: attackData.topURIs || [],
-      topDomains: attackData.allAttacks || [],
-      httpStatusStats: httpStatusStats,
-      totalRequests: attackData.totalRequests || 0,
-      uniqueIPs: attackData.uniqueIPs || 0
+      success: true,
+      risks: aiAnalysis.risks || [],
+      metadata: {
+        totalEvents: analysisData.totalEvents,
+        timeRange: analysisData.timeRange,
+        analysisTimestamp: new Date().toISOString()
+      }
     });
-
+    
   } catch (error) {
-    console.error('❌ 攻擊來源統計失敗:', error);
+    console.error('❌ Cloudflare WAF 風險分析 API 失敗:', error);
     res.status(500).json({ 
-      error: '攻擊來源統計失敗', 
+      success: false,
+      error: 'Cloudflare WAF 風險分析失敗', 
       details: error.message 
     });
   }
