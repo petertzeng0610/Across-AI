@@ -5,17 +5,17 @@ const ELK_CONFIG = {
   // MCP 連接配置
   mcp: {
     // HTTP MCP Server URL（您的 MCP 服務位址）
-    serverUrl: process.env.ELK_MCP_SERVER_URL || 'http://10.168.10.250:8080',
+    serverUrl: process.env.ELK_MCP_SERVER_URL || 'http://127.0.0.1:8080',
     
     // 協議類型：'proxy' 使用 mcp-proxy 橋接, 'stdio' 直接使用 stdio
     protocol: process.env.ELK_MCP_PROTOCOL || 'proxy',
     
     // mcp-proxy 模式配置（推薦）
     // 修復：使用固定路徑，避免 HOME 環境變數在 root 環境下指向錯誤路徑
-    proxyCommand: process.env.MCP_PROXY_PATH || '/Users/peter/.local/bin/mcp-proxy',
+    proxyCommand: process.env.MCP_PROXY_PATH || '/.local/bin/mcp-proxy',
     proxyArgs: [
       '--transport=streamablehttp',
-      `http://10.168.10.250:8080/mcp`
+      `http://127.0.0.1:8080/mcp`
     ],
     
     // stdio 模式配置（備用）
@@ -34,13 +34,13 @@ const ELK_CONFIG = {
 
   // Elasticsearch 連接配置
   elasticsearch: {
-    host: process.env.ELK_HOST || 'https://10.168.10.250:9200',
+    host: process.env.ELK_HOST || 'https://127.0.0.1:9200',
     // 注意：此 index 為預設測試用索引
     // 實際使用時，各產品應使用自己的 ELK 配置：
     // - Cloudflare: config/products/cloudflare/cloudflareELKConfig.js (across-cf-logpush-*)
     // - F5: config/products/f5/f5ELKConfig.js (across-f5-awaf-*)
-    index: process.env.ELK_INDEX || 'across-cf-logpush-*',
-    apiKey: process.env.ELK_API_KEY || 'Z3h5NE1KZ0JXTG9ZV1JjU3pleTA6b2Nfd1FEWjZfUTZmYVZHaW1kRzB6dw==',
+    index: process.env.ELK_INDEX || 'across-cf-*',
+    apiKey: process.env.ELK_API_KEY || 'XzJlcm1wb0JQWGtnSXBHR0tEMFg6MERFYWFNTUFTTmxXOEhpdUg2aGwtUQ==',
     maxResults: parseInt(process.env.ELK_MAX_RESULTS) || 10000
   },
 
