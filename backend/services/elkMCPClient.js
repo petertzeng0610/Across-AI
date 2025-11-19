@@ -392,8 +392,29 @@ class ElkMCPClient {
         ],
         size: 1000  // 增加資料量以確保涵蓋所有攻擊事件
       };
+    } else if (typeof timeRange === 'object' && timeRange.start && timeRange.end) {
+      // 自定義日期範圍查詢（物件格式）
+      console.log('🔍 使用自定義日期範圍:', timeRange.start, 'to', timeRange.end);
+      query = {
+        query: {
+          range: {
+            "@timestamp": {
+              gte: timeRange.start,
+              lte: timeRange.end
+            }
+          }
+        },
+        sort: [
+          {
+            "@timestamp": {
+              order: "desc"
+            }
+          }
+        ],
+        size: 1000
+      };
     } else {
-      // 傳統時間範圍查詢
+      // 傳統時間範圍查詢（字串格式，如 "24h", "7d"）
       const now = new Date();
       const timeRangeMs = this.parseTimeRange(timeRange);
       const fromTime = new Date(now.getTime() - timeRangeMs);
