@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Shield, TrendingUp, AlertTriangle, CheckCircle, XCircle, Globe, Clock, Sparkles, CalendarIcon, ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
+import { Shield, TrendingUp, AlertTriangle, CheckCircle, XCircle, Globe, Clock, Sparkles, CalendarIcon, ChevronDown, ChevronUp, Loader2, Calendar, Activity, RefreshCw, FileText, ExternalLink } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -32,6 +32,7 @@ interface WAFRisk {
   affectedAssets: number
   tags: string[]
   description: string
+  aiInsight?: string
   createdDate: string
   updatedDate: string
   exploitInWild: boolean
@@ -75,19 +76,30 @@ interface ExecutionHistory {
 export default function F5AIAnalysisPage() {
   const [selectedIssue, setSelectedIssue] = useState<string | null>(null)
   const [selectedCategory, setSelectedCategory] = useState<string>("high")
-  const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined)
-  const [dateTo, setDateTo] = useState<Date | undefined>(undefined)
   
-  // 新增：載入狀態
+  // API 調用與載入狀態
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hasAttemptedLoad, setHasAttemptedLoad] = useState(false)
+  const [forceReload, setForceReload] = useState(0)
   const [selectedTimeRange, setSelectedTimeRange] = useState('24h')
   const [analysisMetadata, setAnalysisMetadata] = useState({
     totalEvents: 0,
     timeRange: { start: '', end: '' },
     analysisTimestamp: ''
   })
+  
+  // 手動分析控制
+  const [analysisTriggered, setAnalysisTriggered] = useState(false)
+  const [customDateRange, setCustomDateRange] = useState<{
+    start: Date | undefined
+    end: Date | undefined
+  }>({
+    start: undefined,
+    end: undefined
+  })
+  const [useCustomDate, setUseCustomDate] = useState(false)
+  const [customDateExpanded, setCustomDateExpanded] = useState(false)
 
   const { toast } = useToast()
 
@@ -120,6 +132,11 @@ export default function F5AIAnalysisPage() {
     [key: string]: { resolved: boolean; unresolved: boolean }
   }>({})
 
+  // 操作指引相關狀態
+  const [expandedGuides, setExpandedGuides] = useState<Set<string>>(new Set())
+  const [operationGuides, setOperationGuides] = useState<{[key: string]: any}>({})
+  const [loadingGuides, setLoadingGuides] = useState<Set<string>>(new Set())
+
   const toggleItemsExpanded = (historyId: string, type: "resolved" | "unresolved") => {
     setItemsExpanded((prev) => ({
       ...prev,
@@ -130,151 +147,8 @@ export default function F5AIAnalysisPage() {
     }))
   }
 
-  // 修改：初始為空陣列，從 API 載入真實數據
+  // WAF 風險資料（從 API 載入）
   const [wafRisks, setWafRisks] = useState<WAFRisk[]>([])
-    {
-      id: "xss-attack-massive",
-      title: "跨站腳本 (XSS) 攻擊激增",
-      severity: "high",
-      openIssues: 15492,
-      resolvedIssues: 3240,
-      affectedAssets: 34,
-      tags: ["Internet Exposed", "Confirmed Exploitable"],
-      description:
-        "發現大量 XSS 攻擊嘗試，佔所有攻擊的 12%。攻擊者通過注入惡意腳本試圖竊取用戶憑證和會話資訊。多個前端應用端點已被確認可利用，建議立即採取防護措施。",
-      createdDate: "Aug 24, 2025",
-      updatedDate: "Aug 26, 2025",
-      exploitInWild: false,
-      internetExposed: true,
-      confirmedExploitable: true,
-      cveId: "CVE-2025-8902",
-      recommendations: [
-        {
-          title: "啟用 XSS 攻擊簽名",
-          description: "配置 F5 WAF 的 XSS 攻擊簽名規則，自動識別和阻擋惡意腳本",
-          priority: "high",
-        },
-        {
-          title: "強化輸入驗證",
-          description: "在應用層實施嚴格的輸入驗證和輸出編碼",
-          priority: "high",
-        },
-      ],
-    },
-    {
-      id: "sql-injection-attempts",
-      title: "SQL 注入攻擊持續嘗試",
-      severity: "high",
-      openIssues: 1041,
-      resolvedIssues: 234,
-      affectedAssets: 12,
-      tags: ["Exploit In Wild", "Database Target"],
-      description:
-        "檢測到針對資料庫查詢端點的 SQL 注入攻擊。雖然事件數量相對較少，但此類攻擊的危害性極高，可能導致資料庫資料洩露或被竄改。",
-      createdDate: "Aug 25, 2025",
-      updatedDate: "Aug 26, 2025",
-      exploitInWild: true,
-      internetExposed: true,
-      confirmedExploitable: true,
-      cveId: "CVE-2025-8903",
-      recommendations: [
-        {
-          title: "啟用 SQL 注入防護",
-          description: "啟用 F5 WAF 的 SQL 注入攻擊簽名，阻擋惡意 SQL 語句",
-          priority: "high",
-        },
-        {
-          title: "實施參數化查詢",
-          description: "檢查並更新所有資料庫查詢，使用參數化查詢防止注入",
-          priority: "high",
-        },
-      ],
-    },
-    {
-      id: "session-hijacking-detection",
-      title: "會話劫持攻擊檢測",
-      severity: "medium",
-      openIssues: 6745,
-      resolvedIssues: 1890,
-      affectedAssets: 23,
-      tags: ["Internet Exposed"],
-      description:
-        "發現多起會話劫持攻擊嘗試，攻擊者試圖竊取或偽造用戶會話令牌。此類攻擊佔總攻擊量的 5%，可能導致未授權訪問和資料洩露。",
-      createdDate: "Aug 24, 2025",
-      updatedDate: "Aug 26, 2025",
-      exploitInWild: false,
-      internetExposed: true,
-      confirmedExploitable: false,
-      recommendations: [
-        {
-          title: "強化會話管理",
-          description: "配置 F5 WAF 的會話保護功能，防止會話固定和劫持攻擊",
-          priority: "medium",
-        },
-        {
-          title: "啟用 HTTPS 和 Secure Cookie",
-          description: "確保所有會話 Cookie 使用 Secure 和 HttpOnly 標誌",
-          priority: "medium",
-        },
-      ],
-    },
-    {
-      id: "forceful-browsing",
-      title: "強制瀏覽攻擊",
-      severity: "medium",
-      openIssues: 8092,
-      resolvedIssues: 2341,
-      affectedAssets: 18,
-      tags: ["Internet Exposed"],
-      description:
-        "檢測到攻擊者嘗試通過猜測 URL 訪問未授權資源。此類攻擊佔總量的 6%，可能導致敏感頁面和功能被未授權訪問。",
-      createdDate: "Aug 23, 2025",
-      updatedDate: "Aug 26, 2025",
-      exploitInWild: false,
-      internetExposed: true,
-      confirmedExploitable: false,
-      recommendations: [
-        {
-          title: "配置 URL 訪問控制",
-          description: "設置 F5 WAF 的 URL 訪問控制規則，限制敏感資源訪問",
-          priority: "medium",
-        },
-        {
-          title: "實施強身份驗證",
-          description: "對所有敏感端點實施強身份驗證和授權檢查",
-          priority: "medium",
-        },
-      ],
-    },
-    {
-      id: "abuse-of-functionality",
-      title: "功能濫用攻擊",
-      severity: "low",
-      openIssues: 5392,
-      resolvedIssues: 1823,
-      affectedAssets: 15,
-      tags: [],
-      description:
-        "發現攻擊者濫用應用程式正常功能進行惡意操作，如大量註冊、批量查詢等。此類攻擊佔總量的 4%，可能影響系統性能和資源消耗。",
-      createdDate: "Aug 23, 2025",
-      updatedDate: "Aug 25, 2025",
-      exploitInWild: false,
-      internetExposed: false,
-      confirmedExploitable: false,
-      recommendations: [
-        {
-          title: "實施速率限制",
-          description: "配置 F5 WAF 的速率限制功能，防止功能濫用",
-          priority: "low",
-        },
-        {
-          title: "添加 CAPTCHA 驗證",
-          description: "在敏感操作端點添加 CAPTCHA 驗證，防止自動化濫用",
-          priority: "low",
-        },
-      ],
-    },
-  ])
 
   const risksByCategory = {
     high: wafRisks.filter((r) => r.severity === "critical" || r.severity === "high"),
@@ -298,6 +172,260 @@ export default function F5AIAnalysisPage() {
       openIssues: risksByCategory.low.reduce((sum, r) => sum + r.openIssues, 0),
       affectedAssets: risksByCategory.low.reduce((sum, r) => sum + r.affectedAssets, 0),
     },
+  }
+
+  // 載入 F5 WAF 風險分析資料
+  const loadF5WAFRisks = async () => {
+    console.log('🔄 開始載入 F5 WAF 風險分析...')
+    setIsLoading(true)
+    setError(null)
+
+    try {
+      // 從 localStorage 讀取配置
+      const aiProvider = localStorage.getItem('aiProvider') || 'ollama'
+      const apiKey = localStorage.getItem('geminiApiKey') || ''
+      const aiModel = aiProvider === 'ollama' 
+        ? (localStorage.getItem('ollamaModel') || 'gemma3:4b')
+        : 'gemini-2.0-flash-exp'
+
+      console.log(`🤖 AI 提供者: ${aiProvider}`)
+      console.log(`🤖 AI 模型: ${aiModel}`)
+
+      // 如果使用 Gemini 但沒有 API Key
+      if (aiProvider === 'gemini' && !apiKey) {
+        console.error('❌ 未設定 Gemini API Key')
+        setError('請先設定 Gemini API Key 或切換至 Ollama')
+        setIsLoading(false)
+        setHasAttemptedLoad(true)
+        return
+      }
+
+      // 準備時間範圍參數
+      let timeRangeParam
+      if (useCustomDate && customDateRange.start && customDateRange.end) {
+        timeRangeParam = {
+          start: customDateRange.start.toISOString(),
+          end: customDateRange.end.toISOString()
+        }
+        console.log(`📅 使用自定義日期範圍: ${timeRangeParam.start} 至 ${timeRangeParam.end}`)
+      } else {
+        timeRangeParam = selectedTimeRange
+        console.log(`⏰ 使用快速時間選項: ${selectedTimeRange}`)
+      }
+
+      // 呼叫後端 API
+      const response = await fetch('http://localhost:8080/api/f5/analyze-waf-risks', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          aiProvider: aiProvider,
+          apiKey: apiKey,
+          model: aiModel,
+          timeRange: timeRangeParam
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error(`API 請求失敗: ${response.status} ${response.statusText}`)
+      }
+
+      const data = await response.json()
+      console.log('✅ 成功載入 F5 WAF 風險資料:', data)
+
+      // 保存分析 metadata
+      if (data.metadata) {
+        setAnalysisMetadata({
+          totalEvents: data.metadata.totalEvents || 0,
+          timeRange: data.metadata.timeRange || { start: '', end: '' },
+          analysisTimestamp: data.metadata.analysisTimestamp || new Date().toISOString()
+        })
+      }
+
+      if (data.success && data.risks && data.risks.length > 0) {
+        console.log(`📊 載入了 ${data.risks.length} 個風險項目`)
+        setWafRisks(data.risks)
+      } else {
+        console.warn('⚠️ API 回傳空資料')
+        
+        const totalEvents = data.metadata?.totalEvents || 0
+        if (totalEvents > 0) {
+          setError('未檢測到任何安全威脅')
+        } else {
+          setError('ELK 中沒有足夠的日誌數據，請持續觀察並監控')
+        }
+        
+        setWafRisks([])
+      }
+
+    } catch (err) {
+      console.error('❌ 載入 F5 WAF 風險分析失敗:', err)
+      setError(err instanceof Error ? err.message : '未知錯誤')
+      setWafRisks([])
+    } finally {
+      setIsLoading(false)
+      setHasAttemptedLoad(true)
+    }
+  }
+
+  // 手動觸發分析
+  useEffect(() => {
+    if (analysisTriggered) {
+      loadF5WAFRisks()
+      setAnalysisTriggered(false)
+    }
+  }, [analysisTriggered])
+
+  // 開始 AI 分析（首次）
+  const handleStartAnalysis = () => {
+    console.log('🚀 首次開始 AI 分析')
+    
+    // 驗證設定
+    const aiProvider = localStorage.getItem('aiProvider') || 'ollama'
+    const apiKey = localStorage.getItem('geminiApiKey') || ''
+    
+    if (aiProvider === 'gemini' && !apiKey) {
+      toast({
+        title: "設定錯誤",
+        description: "請先在左側設定 Gemini API Key 或切換至 Ollama",
+        variant: "destructive"
+      })
+      return
+    }
+    
+    // 驗證自定義日期範圍
+    if (useCustomDate) {
+      if (!customDateRange.start || !customDateRange.end) {
+        toast({
+          title: "日期範圍錯誤",
+          description: "請在下方選擇完整的開始和結束日期",
+          variant: "destructive"
+        })
+        return
+      }
+      
+      if (customDateRange.end <= customDateRange.start) {
+        toast({
+          title: "日期範圍錯誤",
+          description: "結束日期必須大於開始日期",
+          variant: "destructive"
+        })
+        return
+      }
+      
+      const daysDiff = (customDateRange.end.getTime() - customDateRange.start.getTime()) / (1000 * 60 * 60 * 24)
+      if (daysDiff > 30) {
+        toast({
+          title: "日期範圍過大",
+          description: "自定義日期範圍不能超過 30 天",
+          variant: "destructive"
+        })
+        return
+      }
+    }
+    
+    // 清空舊資料
+    setWafRisks([])
+    setError(null)
+    setHasAttemptedLoad(false)
+    
+    // 觸發分析
+    setAnalysisTriggered(true)
+    
+    const timeRangeText = useCustomDate 
+      ? `${format(customDateRange.start!, 'yyyy-MM-dd HH:mm')} 至 ${format(customDateRange.end!, 'yyyy-MM-dd HH:mm')}`
+      : getTimeRangeLabel(selectedTimeRange)
+    
+    toast({
+      title: "🚀 開始分析",
+      description: `正在分析 ${timeRangeText} 的 F5 WAF 日誌...`,
+    })
+  }
+
+  // 重新分析
+  const handleReAnalysis = () => {
+    console.log('🔄 重新分析')
+    
+    // 驗證自定義日期範圍（如果使用）
+    if (useCustomDate && (!customDateRange.start || !customDateRange.end)) {
+      toast({
+        title: "日期範圍錯誤",
+        description: "請在下方選擇完整的開始和結束日期",
+        variant: "destructive"
+      })
+      return
+    }
+    
+    // 清空資料
+    setWafRisks([])
+    setHasAttemptedLoad(false)
+    setError(null)
+    
+    // 觸發分析
+    setAnalysisTriggered(true)
+    
+    const timeRangeText = useCustomDate 
+      ? `${format(customDateRange.start!, 'yyyy-MM-dd HH:mm')} 至 ${format(customDateRange.end!, 'yyyy-MM-dd HH:mm')}`
+      : getTimeRangeLabel(selectedTimeRange)
+    
+    toast({
+      title: "🔄 重新分析",
+      description: `正在重新分析 ${timeRangeText} 的 F5 WAF 日誌...`,
+    })
+  }
+
+  // 時間範圍改變處理（只更新選擇，不自動觸發）
+  const handleTimeRangeChange = (timeRange: string) => {
+    console.log(`⏰ 時間範圍變更: ${timeRange}`)
+    setSelectedTimeRange(timeRange)
+    setUseCustomDate(false)
+  }
+
+  // 格式化數字
+  const formatNumber = (num: number) => {
+    return num.toLocaleString('zh-TW')
+  }
+
+  // 時間範圍標籤
+  const getTimeRangeLabel = (timeRange: string) => {
+    const labels: { [key: string]: string } = {
+      '1h': '過去 1 小時',
+      '6h': '過去 6 小時',
+      '12h': '過去 12 小時',
+      '24h': '過去 24 小時',
+      '7d': '過去 7 天',
+      '30d': '過去 30 天'
+    }
+    return labels[timeRange] || timeRange
+  }
+
+  // 格式化日期時間
+  const formatDateTime = (isoString: string) => {
+    if (!isoString) return ''
+    const date = new Date(isoString)
+    return date.toLocaleString('zh-TW', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    })
+  }
+
+  // 相對時間顯示
+  const getRelativeTime = (isoString: string) => {
+    if (!isoString) return ''
+    const now = new Date().getTime()
+    const then = new Date(isoString).getTime()
+    const diff = Math.floor((now - then) / 1000)
+
+    if (diff < 60) return '剛剛'
+    if (diff < 3600) return `${Math.floor(diff / 60)} 分鐘前`
+    if (diff < 86400) return `${Math.floor(diff / 3600)} 小時前`
+    return formatDateTime(isoString)
   }
 
   useEffect(() => {
@@ -356,10 +484,93 @@ export default function F5AIAnalysisPage() {
   const totalEvents = totalOpenIssues + totalResolvedIssues
   const totalAffectedAssets = wafRisks.reduce((sum, risk) => sum + risk.affectedAssets, 0)
 
-  const handleExecuteAction = (actionTitle: string, actionDescription: string, issueId: string) => {
-    setSelectedAction({ title: actionTitle, description: actionDescription, issueId })
-    setConfirmDialogOpen(true)
-  }
+  // 點擊「查看操作步驟」按鈕時的處理
+  const handleExecuteAction = async (
+    actionTitle: string, 
+    actionDescription: string, 
+    issueId: string,
+    actionIndex: number
+  ) => {
+    const guideKey = `${issueId}-${actionIndex}`;
+    
+    // 如果已展開，則收起
+    if (expandedGuides.has(guideKey)) {
+      setExpandedGuides(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(guideKey);
+        return newSet;
+      });
+      return;
+    }
+    
+    // 如果已有操作指引，直接展開
+    if (operationGuides[guideKey]) {
+      setExpandedGuides(prev => new Set(prev).add(guideKey));
+      return;
+    }
+    
+    // 載入操作指引
+    setLoadingGuides(prev => new Set(prev).add(guideKey));
+    
+    try {
+      const response = await fetch('http://localhost:8080/api/f5/get-operation-guide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recommendationTitle: actionTitle,
+          category: null
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (data.success && data.guide) {
+        setOperationGuides(prev => ({
+          ...prev,
+          [guideKey]: data.guide
+        }));
+        setExpandedGuides(prev => new Set(prev).add(guideKey));
+        
+        toast({
+          title: "✅ 操作指引已載入",
+          description: "請依照步驟完成設定"
+        });
+      } else {
+        toast({
+          title: "⚠️ 找不到操作指引",
+          description: data.message || "暫無此操作的詳細步驟",
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      console.error('載入操作指引失敗:', error);
+      toast({
+        title: "❌ 載入失敗",
+        description: "無法取得操作指引，請稍後再試",
+        variant: "destructive"
+      });
+    } finally {
+      setLoadingGuides(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(guideKey);
+        return newSet;
+      });
+    }
+  };
+
+  // 操作完成處理
+  const handleOperationComplete = (guideKey: string) => {
+    setExpandedGuides(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(guideKey);
+      return newSet;
+    });
+    
+    toast({
+      title: "✅ 操作已完成",
+      description: "已標記為完成，建議稍後檢查效果"
+    });
+  };
 
   const confirmExecution = async () => {
     if (!selectedAction) return
@@ -751,7 +962,7 @@ export default function F5AIAnalysisPage() {
   }
 
   return (
-    <div className="font-bold text-white text-2xl">
+    <div className="min-h-screen bg-[#08131D] p-6">
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}
@@ -761,130 +972,374 @@ export default function F5AIAnalysisPage() {
       >
         <div className="flex items-center gap-3 mb-2">
           <h1 className="text-3xl font-bold text-white">AI Cyber Security Analysis - F5</h1>
-        </div>
-        <p className="text-slate-400 font-medium">基於 F5 WAF 安全數據的智能分析與建議</p>
-      </motion.div>
-
-      {/* Date Range Selector */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.05 }}
-        className="mb-6"
-      >
-        <div className="flex items-center gap-4">
-          <div className="text-sm text-slate-400 font-normal">選擇時間範圍：</div>
-
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                className={cn(
-                  "w-[200px] justify-start text-left font-normal bg-slate-900/40 border-white/10 text-white hover:bg-slate-800/60",
-                  !dateFrom && "text-slate-400",
-                )}
-              >
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {dateFrom ? format(dateFrom, "yyyy年M月d日") : "選擇起始日期"}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0 bg-slate-900 border-white/10" align="start">
-              <CustomDatePicker selected={dateFrom} onSelect={setDateFrom} />
-            </PopoverContent>
-          </Popover>
-
-          <span className="text-slate-400 text-sm font-normal">至</span>
-
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                className={cn(
-                  "w-[200px] justify-start text-left font-normal bg-slate-900/40 border-white/10 text-white hover:bg-slate-800/60",
-                  !dateTo && "text-slate-400",
-                )}
-              >
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {dateTo ? format(dateTo, "yyyy年M月d日") : "選擇結束日期"}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0 bg-slate-900 border-white/10" align="start">
-              <CustomDatePicker selected={dateTo} onSelect={setDateTo} />
-            </PopoverContent>
-          </Popover>
-
-          {(dateFrom || dateTo) && (
-            <>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setDateFrom(undefined)
-                  setDateTo(undefined)
-                }}
-                className="text-slate-400 hover:text-white font-normal"
-              >
-                清除
-              </Button>
-
-              <Button
-                className="bg-cyan-600 hover:bg-cyan-700 text-white font-normal"
-                onClick={() => {
-                  console.log("[v0] Loading AI analysis for date range:", { dateFrom, dateTo })
-                }}
-              >
-                <Sparkles className="mr-2 h-4 w-4" />
-                載入AI分析
-              </Button>
-            </>
+          {isLoading && (
+            <div className="flex items-center gap-2 text-cyan-400 text-sm">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-cyan-400"></div>
+              <span>載入中...</span>
+            </div>
           )}
+          <Button
+            onClick={hasAttemptedLoad ? handleReAnalysis : handleStartAnalysis}
+            disabled={isLoading}
+            className={`ml-auto ${
+              hasAttemptedLoad 
+                ? 'bg-cyan-600 hover:bg-cyan-700' 
+                : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 shadow-lg'
+            } text-white font-semibold px-6 py-2 transition-all`}
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                分析中...
+              </>
+            ) : hasAttemptedLoad ? (
+              <>
+                <RefreshCw className="w-4 h-4 mr-2" />
+                重新分析
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4 mr-2" />
+                開始 AI 分析
+              </>
+            )}
+          </Button>
         </div>
+        <p className="text-slate-400">
+          基於 F5 WAF 安全數據的智能分析與建議 | 總計 {totalOpenIssues} 個開放問題，影響 {totalAffectedAssets} 個資產
+        </p>
+        {error && (
+          <div className="mt-2 p-3 bg-red-900/20 border border-red-500/50 rounded-lg text-red-400 text-sm">
+            ⚠️ {error}
+          </div>
+        )}
       </motion.div>
 
-      {/* Summary Cards */}
+      {/* 分析資訊區 */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, delay: 0.1 }}
         className="mb-6"
       >
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Card className="bg-slate-900/40 border-white/10 backdrop-blur-sm">
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-slate-400 mb-1 text-xs font-normal">總事件數</div>
-                  <div className="text-white text-2xl font-semibold">{totalEvents.toLocaleString()}</div>
-                </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+          {/* 時間範圍卡片 */}
+          <Card className="bg-slate-900/40 border-cyan-500/30 backdrop-blur-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Calendar className="w-4 h-4 text-cyan-400" />
+                <span className="text-sm font-semibold text-slate-300">時間範圍</span>
               </div>
-              <div className="mt-3 text-xs text-slate-400 font-medium">分析自 F5 WAF Dashboard</div>
+              <div className="text-2xl font-bold text-cyan-400 mb-1">
+                {getTimeRangeLabel(selectedTimeRange)}
+              </div>
+              {analysisMetadata.timeRange.start && (
+                <div className="text-xs text-slate-400 space-y-0.5">
+                  <div>{formatDateTime(analysisMetadata.timeRange.start)}</div>
+                  <div className="text-center">至</div>
+                  <div>{formatDateTime(analysisMetadata.timeRange.end)}</div>
+                </div>
+              )}
             </CardContent>
           </Card>
 
-          <Card className="bg-slate-900/40 border-white/10 backdrop-blur-sm">
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-slate-400 mb-1 text-xs">未解決事件數</div>
-                  <div className="text-white text-2xl font-semibold">{totalOpenIssues.toLocaleString()}</div>
-                </div>
+          {/* 事件總數卡片 */}
+          <Card className={`bg-slate-900/40 backdrop-blur-sm ${
+            analysisMetadata.totalEvents > 0 ? 'border-green-500/30' : 'border-yellow-500/30'
+          }`}>
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Activity className="w-4 h-4 text-green-400" />
+                <span className="text-sm font-semibold text-slate-300">事件總數</span>
               </div>
-              <div className="mt-3 text-xs text-red-400 font-normal">需要立即處理</div>
+              <div className={`text-2xl font-bold mb-1 ${
+                analysisMetadata.totalEvents > 0 ? 'text-green-400' : 'text-yellow-400'
+              }`}>
+                {formatNumber(analysisMetadata.totalEvents)} 筆
+              </div>
+              <div className={`text-xs flex items-center gap-1 ${
+                analysisMetadata.totalEvents > 0 ? 'text-green-400' : 'text-yellow-400'
+              }`}>
+                {analysisMetadata.totalEvents > 0 ? (
+                  <>
+                    <CheckCircle className="w-3 h-3" />
+                    <span>已連接 ELK</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="w-3 h-3" />
+                    <span>無數據</span>
+                  </>
+                )}
+              </div>
             </CardContent>
           </Card>
 
-          <Card className="bg-slate-900/40 border-white/10 backdrop-blur-sm">
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-slate-400 mb-1 text-xs font-normal">已解決事件數</div>
-                  <div className="text-green-400 text-2xl font-semibold">{totalResolvedIssues.toLocaleString()}</div>
-                </div>
+          {/* 最後分析時間卡片 */}
+          <Card className="bg-slate-900/40 border-purple-500/30 backdrop-blur-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Clock className="w-4 h-4 text-purple-400" />
+                <span className="text-sm font-semibold text-slate-300">最後分析</span>
               </div>
-              <div className="mt-3 text-xs text-green-400 font-normal">已成功緩解</div>
+              <div className="text-2xl font-bold text-purple-400 mb-1">
+                {getRelativeTime(analysisMetadata.analysisTimestamp)}
+              </div>
+              {analysisMetadata.analysisTimestamp && (
+                <div className="text-xs text-slate-400">
+                  {formatDateTime(analysisMetadata.analysisTimestamp)}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
+
+        {/* 時間範圍選擇器 */}
+        <Card className="bg-slate-900/40 border-white/10 backdrop-blur-sm">
+          <CardContent className="p-4">
+            {/* 快速時間選擇 */}
+            <div className="flex items-center gap-2 mb-3">
+              <Clock className="w-4 h-4 text-cyan-400" />
+              <span className="text-sm font-semibold text-slate-300">快速時間選擇</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {['1h', '6h', '12h', '24h', '7d', '30d'].map((range) => (
+                <Button
+                  key={range}
+                  onClick={() => handleTimeRangeChange(range)}
+                  disabled={isLoading}
+                  size="sm"
+                  variant="outline"
+                  className={`
+                    ${selectedTimeRange === range && !useCustomDate
+                      ? 'bg-cyan-600 border-cyan-500 text-white hover:bg-cyan-700 hover:text-white' 
+                      : 'bg-slate-800/50 border-slate-600/50 text-slate-300 hover:bg-slate-700/50 hover:border-slate-500'
+                    }
+                    ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}
+                  `}
+                >
+                  {selectedTimeRange === range && !useCustomDate && (
+                    <CheckCircle className="w-3 h-3 mr-1" />
+                  )}
+                  {getTimeRangeLabel(range).replace('過去 ', '')}
+                </Button>
+              ))}
+            </div>
+
+            {/* 自定義日期範圍（可折疊）*/}
+            <div className="mt-4 pt-4 border-t border-slate-700">
+              {/* 折疊標題 */}
+              <div 
+                onClick={() => setCustomDateExpanded(!customDateExpanded)}
+                className="flex items-center justify-between cursor-pointer hover:bg-slate-800/30 p-2 rounded transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <CalendarIcon className="w-4 h-4 text-cyan-400" />
+                  <span className="text-sm font-semibold text-slate-300">或選擇自定義日期範圍</span>
+                  {useCustomDate && customDateRange.start && customDateRange.end && (
+                    <Badge variant="outline" className="ml-2 bg-cyan-900/20 text-cyan-400 border-cyan-500/30 text-xs">
+                      已選擇
+                    </Badge>
+                  )}
+                </div>
+                {customDateExpanded ? (
+                  <ChevronUp className="w-4 h-4 text-slate-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-slate-400" />
+                )}
+              </div>
+
+              {/* 可折疊內容 */}
+              <AnimatePresence>
+                {customDateExpanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="pt-3 space-y-3">
+                      {/* 日期選擇器 */}
+                      <div className="flex gap-2 items-center flex-wrap">
+                        <div className="flex-1 min-w-[200px]">
+                          <CustomDatePicker
+                            selected={customDateRange.start}
+                            onSelect={(date) => {
+                              setCustomDateRange(prev => ({ ...prev, start: date }))
+                              setUseCustomDate(true)
+                              setCustomDateExpanded(true)
+                            }}
+                            placeholder="選擇開始日期"
+                            disabled={isLoading}
+                          />
+                        </div>
+                        <span className="text-slate-400 text-sm">至</span>
+                        <div className="flex-1 min-w-[200px]">
+                          <CustomDatePicker
+                            selected={customDateRange.end}
+                            onSelect={(date) => {
+                              setCustomDateRange(prev => ({ ...prev, end: date }))
+                              setUseCustomDate(true)
+                              setCustomDateExpanded(true)
+                            }}
+                            placeholder="選擇結束日期"
+                            disabled={isLoading}
+                          />
+                        </div>
+                      </div>
+                      
+                      {/* 自定義日期提示 */}
+                      {useCustomDate && customDateRange.start && customDateRange.end && (
+                        <div className="p-2 bg-cyan-900/20 border border-cyan-500/30 rounded text-xs text-cyan-400 flex items-center gap-2">
+                          <CheckCircle className="w-3 h-3 flex-shrink-0" />
+                          <span>
+                            已選擇：{format(customDateRange.start, 'yyyy-MM-dd HH:mm')} 至 {format(customDateRange.end, 'yyyy-MM-dd HH:mm')}
+                          </span>
+                        </div>
+                      )}
+                      
+                      {/* 清除按鈕 */}
+                      {useCustomDate && (
+                        <Button
+                          onClick={() => {
+                            setUseCustomDate(false)
+                            setCustomDateRange({ start: undefined, end: undefined })
+                            setCustomDateExpanded(false)
+                          }}
+                          disabled={isLoading}
+                          variant="ghost"
+                          size="sm"
+                          className="text-slate-400 hover:text-white text-xs"
+                        >
+                          清除自定義日期
+                        </Button>
+                      )}
+                      
+                      {/* 使用說明（只在展開時顯示簡化版）*/}
+                      <div className="p-3 bg-slate-800/50 border border-slate-600/50 rounded text-xs text-slate-400">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-yellow-400 mt-0.5 flex-shrink-0" />
+                          <div>
+                            <p className="font-semibold text-slate-300 mb-1">使用說明</p>
+                            <ul className="space-y-1 list-disc list-inside">
+                              <li>自定義日期範圍最長 30 天</li>
+                              <li>結束日期必須大於開始日期</li>
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </CardContent>
+        </Card>
       </motion.div>
+
+      {/* 空狀態顯示 */}
+      {!isLoading && wafRisks.length === 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.2 }}
+          className="mb-6"
+        >
+          <Card className="bg-slate-900/40 border-cyan-500/20 backdrop-blur-sm">
+            <CardContent className="py-12 text-center">
+              {/* 如果有錯誤，顯示錯誤提示 */}
+              {error ? (
+                <div className="flex flex-col items-center gap-4">
+                  <div className="w-20 h-20 rounded-full bg-red-500/20 flex items-center justify-center">
+                    <AlertTriangle className="w-10 h-10 text-red-400" />
+                  </div>
+                  <div className="max-w-2xl">
+                    <h3 className="text-2xl font-bold text-white mb-2">
+                      {error?.includes('ELK 中沒有足夠的日誌數據') 
+                        ? '日誌數據不足' 
+                        : error?.includes('未檢測到任何安全威脅') 
+                          ? '未檢測到安全威脅' 
+                          : '分析出現問題'}
+                    </h3>
+                    <p className="text-slate-400 text-base leading-relaxed">
+                      {error?.includes('ELK 中沒有足夠的日誌數據')
+                        ? 'ELK 中沒有足夠的 F5 WAF 日誌數據進行分析。請確認日誌來源配置正確，並持續觀察監控。建議檢查 F5 日誌是否正常推送到 ELK，或調整時間範圍以包含更多數據。'
+                        : error?.includes('未檢測到任何安全威脅')
+                          ? '在指定時間範圍內，F5 WAF 已成功分析日誌數據，未檢測到任何安全威脅。這表示系統目前運行正常，所有請求均通過安全檢查。請繼續保持監控。'
+                          : error}
+                    </p>
+                  </div>
+                  <Button
+                    onClick={handleReAnalysis}
+                    className="mt-4 bg-cyan-600 hover:bg-cyan-700 text-white"
+                  >
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                    重新分析
+                  </Button>
+                </div>
+              ) : (
+                /* 未開始分析，顯示引導提示 */
+                <div className="flex flex-col items-center gap-4">
+                  {/* 圖標 */}
+                  <div className="w-20 h-20 rounded-full bg-gradient-to-br from-cyan-500/20 to-blue-500/20 flex items-center justify-center">
+                    <Activity className="w-10 h-10 text-cyan-400" />
+                  </div>
+                  
+                  {/* 標題與說明 */}
+                  <div className="max-w-2xl">
+                    <h3 className="text-2xl font-bold text-white mb-2">
+                      準備開始 AI 安全分析
+                    </h3>
+                    <p className="text-slate-400 text-base leading-relaxed">
+                      選擇時間範圍後，點擊右上角「開始 AI 分析」按鈕，系統將使用 F5 多層次判斷模型分析 WAF 日誌並生成安全報告
+                    </p>
+                  </div>
+                  
+                  {/* 步驟指引 */}
+                  <div className="flex items-center gap-6 mt-6">
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-12 h-12 rounded-full bg-cyan-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
+                        1
+                      </div>
+                      <span className="text-sm text-slate-300">選擇時間範圍</span>
+                    </div>
+                    
+                    <div className="text-cyan-500 text-2xl">→</div>
+                    
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-12 h-12 rounded-full bg-cyan-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
+                        2
+                      </div>
+                      <span className="text-sm text-slate-300">開始 AI 分析</span>
+                    </div>
+                    
+                    <div className="text-cyan-500 text-2xl">→</div>
+                    
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-12 h-12 rounded-full bg-cyan-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
+                        3
+                      </div>
+                      <span className="text-sm text-slate-300">查看安全報告</span>
+                    </div>
+                  </div>
+                  
+                  {/* 快速開始提示 */}
+                  <div className="mt-6 p-4 bg-cyan-900/20 border border-cyan-500/30 rounded-lg max-w-lg">
+                    <div className="flex items-center gap-3">
+                      <Sparkles className="w-5 h-5 text-cyan-400 flex-shrink-0" />
+                      <p className="text-sm text-cyan-300 text-left">
+                        <strong>快速開始：</strong>
+                        使用預設的「24 小時」範圍，直接點擊右上角「開始 AI 分析」按鈕
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
 
       {/* Executing Overlay */}
       <AnimatePresence>
@@ -944,7 +1399,8 @@ export default function F5AIAnalysisPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Three Column Layout */}
+      {/* Three Column Layout - 只在有風險資料時顯示 */}
+      {wafRisks.length > 0 && (
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Column 1: Risk Assessment */}
         <motion.div
@@ -1207,9 +1663,7 @@ export default function F5AIAnalysisPage() {
                             <h4 className="text-white font-semibold text-base">AI 深度分析</h4>
                           </div>
                           <p className="text-slate-300 leading-relaxed text-sm">
-                            根據 F5 WAF 威脅情報分析，此類攻擊在過去 72 小時內呈現持續上升趨勢。
-                            攻擊者主要針對公開暴露的端點，建議立即採取 F5 Advanced WAF 防護措施並啟用學習模式。
-                            系統已自動標記 {assessment.affectedAssets} 個受影響資產，建議優先處理高風險端點。
+                            {assessment.aiInsight || `根據 F5 WAF 威脅情報分析，檢測到 ${assessment.openIssues} 次攻擊事件，共影響 ${assessment.affectedAssets} 個資產。建議立即採取 F5 Advanced WAF 防護措施並啟用學習模式，優先處理高風險端點。`}
                           </p>
                         </div>
                       </div>
@@ -1263,59 +1717,249 @@ export default function F5AIAnalysisPage() {
                         </div>
 
                         {assessment.recommendations.map((rec, idx) => {
-                          const actionKey = `${assessment.id}-${rec.title}`
-                          const isExecuted = executedActions.has(actionKey)
+                          const guideKey = `${assessment.id}-${idx}`;
+                          const isExpanded = expandedGuides.has(guideKey);
+                          const guide = operationGuides[guideKey];
+                          const isLoading = loadingGuides.has(guideKey);
 
                           return (
-                            <div
-                              key={idx}
-                              className={`p-4 rounded-lg border ${
-                                isExecuted
-                                  ? "bg-green-900/20 border-green-500/30"
-                                  : "bg-slate-800/50 border-cyan-400/30"
-                              }`}
-                            >
-                              <div className="flex items-start gap-3 mb-4">
-                                <div className="flex-1">
-                                  <div className="flex items-center gap-2 mb-1">
-                                    {isExecuted && <CheckCircle className="w-4 h-4 text-green-400" />}
-                                    <h4 className="text-white font-medium text-sm">{rec.title}</h4>
-                                    <Badge
-                                      className={
-                                        rec.priority === "high"
-                                          ? "bg-red-500/20 text-red-400 border-red-500/50"
-                                          : "bg-yellow-500/20 text-yellow-400 border-yellow-500/50"
-                                      }
-                                      variant="outline"
-                                    >
-                                      {rec.priority.toUpperCase()}
-                                    </Badge>
+                            <div key={idx} className="space-y-2">
+                              {/* 建議卡片 */}
+                              <div className="p-4 rounded-lg bg-slate-800/50 border border-cyan-400/30">
+                                <div className="flex items-start gap-3 mb-4">
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <h4 className="text-white font-medium text-sm">{rec.title}</h4>
+                                      {rec.priority && (
+                                        <Badge
+                                          className={
+                                            rec.priority === "high"
+                                              ? "bg-red-500/20 text-red-400 border-red-500/50"
+                                              : "bg-yellow-500/20 text-yellow-400 border-yellow-500/50"
+                                          }
+                                          variant="outline"
+                                        >
+                                          {rec.priority.toUpperCase()}
+                                        </Badge>
+                                      )}
+                                    </div>
+                                    <p className="text-xs text-slate-400">{rec.description}</p>
                                   </div>
-                                  <p className="text-xs text-slate-400">{rec.description}</p>
                                 </div>
-                              </div>
 
-                              <Button
-                                onClick={() => handleExecuteAction(rec.title, rec.description, assessment.id)}
-                                disabled={isExecuted}
-                                className={`w-full ${
-                                  isExecuted
-                                    ? "bg-green-600/50 hover:bg-green-600/50 cursor-not-allowed"
-                                    : "bg-cyan-600 hover:bg-cyan-700"
-                                } text-white`}
-                              >
-                                {isExecuted ? (
-                                  <>
-                                    <CheckCircle className="w-4 h-4 mr-2" />
-                                    已執行
-                                  </>
-                                ) : (
-                                  <>
-                                    <CheckCircle className="w-4 h-4 mr-2" />
-                                    執行此操作
-                                  </>
+                                <Button
+                                  onClick={() => handleExecuteAction(rec.title, rec.description, assessment.id, idx)}
+                                  disabled={isLoading}
+                                  className={`w-full ${
+                                    isExpanded
+                                      ? "bg-slate-600 hover:bg-slate-700"
+                                      : "bg-cyan-600 hover:bg-cyan-700"
+                                  } text-white`}
+                                >
+                                  {isLoading ? (
+                                    <>
+                                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                      載入中...
+                                    </>
+                                  ) : isExpanded ? (
+                                    <>
+                                      <ChevronUp className="w-4 h-4 mr-2" />
+                                      收起操作步驟
+                                    </>
+                                  ) : (
+                                    <>
+                                      <FileText className="w-4 h-4 mr-2" />
+                                      查看操作步驟
+                                    </>
+                                  )}
+                                </Button>
+                              </div>
+                              
+                              {/* 操作指引展開區塊 */}
+                              <AnimatePresence>
+                                {isExpanded && guide && (
+                                  <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: 'auto', opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    transition={{ duration: 0.3 }}
+                                    className="overflow-hidden"
+                                  >
+                                    <Card className="bg-slate-800/30 border-cyan-500/30">
+                                      <CardContent className="p-6 space-y-6">
+                                        {/* 操作指引標題與資訊 */}
+                                        <div className="flex items-start justify-between">
+                                          <div>
+                                            <h3 className="text-lg font-bold text-white mb-2">
+                                              📘 {guide.title}
+                                            </h3>
+                                            <div className="flex items-center gap-4 text-sm text-slate-400">
+                                              <div className="flex items-center gap-1">
+                                                <Clock className="w-4 h-4" />
+                                                <span>{guide.estimatedTime}</span>
+                                              </div>
+                                              <Badge className={
+                                                guide.severity === 'high' 
+                                                  ? "bg-red-500/20 text-red-400 border-red-500/50" 
+                                                  : guide.severity === 'critical'
+                                                    ? "bg-red-600/20 text-red-300 border-red-600/50"
+                                                    : "bg-yellow-500/20 text-yellow-400 border-yellow-500/50"
+                                              }>
+                                                {guide.severity.toUpperCase()}
+                                              </Badge>
+                                            </div>
+                                          </div>
+                                        </div>
+
+                                        {/* 前置條件 */}
+                                        {guide.prerequisites && guide.prerequisites.length > 0 && (
+                                          <div className="p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
+                                            <div className="flex items-center gap-2 mb-2">
+                                              <AlertTriangle className="w-4 h-4 text-blue-400" />
+                                              <span className="text-sm font-semibold text-blue-300">
+                                                前置條件
+                                              </span>
+                                            </div>
+                                            <ul className="space-y-1 text-sm text-slate-300">
+                                              {guide.prerequisites.map((prereq: string, i: number) => (
+                                                <li key={i} className="flex items-start gap-2">
+                                                  <span className="text-blue-400 mt-1">•</span>
+                                                  <span>{prereq}</span>
+                                                </li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        )}
+
+                                        {/* 操作步驟 */}
+                                        <div className="space-y-4">
+                                          <div className="flex items-center gap-2 text-white font-semibold">
+                                            <span className="text-cyan-400">📋</span>
+                                            <span>操作步驟</span>
+                                          </div>
+                                          
+                                          {guide.steps.map((step: any, stepIndex: number) => (
+                                            <div 
+                                              key={stepIndex}
+                                              className="p-4 bg-slate-900/50 border border-slate-600/50 rounded-lg space-y-3"
+                                            >
+                                              {/* 步驟標題 */}
+                                              <div className="flex items-start gap-3">
+                                                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-cyan-600 flex items-center justify-center text-white font-bold text-sm">
+                                                  {step.stepNumber}
+                                                </div>
+                                                <div className="flex-1">
+                                                  <h4 className="text-white font-semibold mb-1">
+                                                    {step.title}
+                                                  </h4>
+                                                  <p className="text-sm text-slate-400">
+                                                    {step.description}
+                                                  </p>
+                                                </div>
+                                              </div>
+                                              
+                                              {/* 詳細動作 */}
+                                              {step.actions && step.actions.length > 0 && (
+                                                <div className="ml-11 space-y-2">
+                                                  {step.actions.map((action: string, actionIndex: number) => (
+                                                    <div 
+                                                      key={actionIndex}
+                                                      className="flex items-start gap-2 text-sm text-slate-300"
+                                                    >
+                                                      <CheckCircle className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+                                                      <span>{action}</span>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              )}
+                                              
+                                              {/* 注意事項 */}
+                                              {step.notes && (
+                                                <div className="ml-11 p-3 bg-yellow-900/20 border border-yellow-500/30 rounded text-sm text-yellow-200 flex items-start gap-2">
+                                                  <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                                                  <span>{step.notes}</span>
+                                                </div>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+
+                                        {/* 參考文件 */}
+                                        {guide.references && guide.references.length > 0 && (
+                                          <div className="p-4 bg-slate-900/50 border border-slate-600/50 rounded-lg">
+                                            <div className="flex items-center gap-2 mb-3 text-white font-semibold">
+                                              <span>📚</span>
+                                              <span>參考文件</span>
+                                            </div>
+                                            <ul className="space-y-2">
+                                              {guide.references.map((ref: any, i: number) => (
+                                                <li key={i}>
+                                                  <a 
+                                                    href={ref.url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-sm text-cyan-400 hover:text-cyan-300 flex items-center gap-2"
+                                                  >
+                                                    <span>{ref.title}</span>
+                                                    <ExternalLink className="w-3 h-3" />
+                                                  </a>
+                                                </li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        )}
+
+                                        {/* 疑難排解 */}
+                                        {guide.troubleshooting && guide.troubleshooting.length > 0 && (
+                                          <div className="p-4 bg-slate-900/50 border border-slate-600/50 rounded-lg">
+                                            <div className="flex items-center gap-2 mb-3 text-white font-semibold">
+                                              <span>🔧</span>
+                                              <span>常見問題與疑難排解</span>
+                                            </div>
+                                            <div className="space-y-3">
+                                              {guide.troubleshooting.map((item: any, i: number) => (
+                                                <div key={i} className="space-y-1">
+                                                  <div className="text-sm font-semibold text-red-400">
+                                                    ❌ {item.issue}
+                                                  </div>
+                                                  <div className="text-sm text-slate-300 ml-4">
+                                                    ✅ {item.solution}
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {/* 操作完成按鈕 */}
+                                        <div className="flex gap-3 pt-4 border-t border-slate-600">
+                                          <Button
+                                            onClick={() => handleOperationComplete(guideKey)}
+                                            className="flex-1 bg-green-600 hover:bg-green-700 text-white"
+                                          >
+                                            <CheckCircle className="w-4 h-4 mr-2" />
+                                            操作完成
+                                          </Button>
+                                          <Button
+                                            onClick={() => {
+                                              setExpandedGuides(prev => {
+                                                const newSet = new Set(prev);
+                                                newSet.delete(guideKey);
+                                                return newSet;
+                                              });
+                                            }}
+                                            variant="outline"
+                                            className="bg-slate-700 hover:bg-slate-600 text-white border-slate-500"
+                                          >
+                                            <ChevronUp className="w-4 h-4 mr-2" />
+                                            收起
+                                          </Button>
+                                        </div>
+                                      </CardContent>
+                                    </Card>
+                                  </motion.div>
                                 )}
-                              </Button>
+                              </AnimatePresence>
                             </div>
                           )
                         })}
@@ -1375,6 +2019,7 @@ export default function F5AIAnalysisPage() {
           </Card>
         </motion.div>
       </div>
+      )}
     </div>
   )
 }
