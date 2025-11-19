@@ -28,7 +28,7 @@ router.post('/test-ai', async (req, res) => {
       if (!model) {
         return res.status(400).json({ 
           error: '請指定 Ollama 模型名稱',
-          example: 'gemma3:4b, llama3:8b'
+          example: 'gpt-oss:20b'
         });
       }
       
