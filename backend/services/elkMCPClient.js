@@ -373,7 +373,7 @@ class ElkMCPClient {
   }
 
   // 建構 Elasticsearch 查詢（產品無關）
-  buildElasticsearchQuery(timeRange = '1h', filters = {}, fieldMapping = null) {
+  buildElasticsearchQuery(timeRange = '1h', filters = {}, fieldMapping = null, maxResults = ELK_CONFIG.elasticsearch.maxResults) {
     // 智能時間範圍查詢策略
     let query;
     
@@ -486,6 +486,15 @@ class ElkMCPClient {
       }
     }
 
+    // 全域限制最大回傳筆數，避免 MCP search 過載
+    const configuredLimit = Number.isInteger(ELK_CONFIG.elasticsearch.maxResults) && ELK_CONFIG.elasticsearch.maxResults > 0
+      ? ELK_CONFIG.elasticsearch.maxResults
+      : 2;
+    const limit = Number.isInteger(maxResults) && maxResults > 0
+      ? Math.min(maxResults, configuredLimit)
+      : configuredLimit;
+    query.size = Math.min(query.size || limit, limit);
+
     return query;
   }
 
@@ -525,7 +534,7 @@ class ElkMCPClient {
     }
 
     try {
-      const query = this.buildElasticsearchQuery(timeRange, filters, fieldMapping);
+      const query = this.buildElasticsearchQuery(timeRange, filters, fieldMapping, ELK_CONFIG.elasticsearch.maxResults);
       
       // 使用提供的索引模式，或回退到預設
       const targetIndex = indexPattern || ELK_CONFIG.elasticsearch.index;
@@ -543,7 +552,7 @@ class ElkMCPClient {
           index: targetIndex,
           query_body: query
         }
-      }, {
+      }, undefined, {
         timeout: 300000,  // 5 分鐘超時
         resetTimeoutOnProgress: true  // 收到進度通知時重置超時
       });
@@ -690,7 +699,7 @@ class ElkMCPClient {
     try {
       await newClient.connect();
       
-      const query = newClient.buildElasticsearchQuery(timeRange, filters, fieldMapping);
+      const query = newClient.buildElasticsearchQuery(timeRange, filters, fieldMapping, ELK_CONFIG.elasticsearch.maxResults);
       const targetIndex = indexPattern || ELK_CONFIG.elasticsearch.index;
       
       console.log('📊 執行 Elasticsearch 查詢（新實例）...');
@@ -705,7 +714,7 @@ class ElkMCPClient {
           index: targetIndex,
           query_body: query
         }
-      }, {
+      }, undefined, {
         timeout: 300000,  // 5 分鐘超時
         resetTimeoutOnProgress: true  // 收到進度通知時重置超時
       });
