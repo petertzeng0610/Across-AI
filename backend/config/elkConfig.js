@@ -28,7 +28,7 @@ const ELK_CONFIG = {
     ],
     
     // 連接配置
-    timeout: parseInt(process.env.ELK_MCP_TIMEOUT) || 30000,
+    timeout: parseInt(process.env.ELK_MCP_TIMEOUT) || 300000,
     retryAttempts: parseInt(process.env.ELK_MCP_RETRY) || 3
   },
 
@@ -39,7 +39,7 @@ const ELK_CONFIG = {
     // 實際使用時，各產品應使用自己的 ELK 配置：
     // - Cloudflare: config/products/cloudflare/cloudflareELKConfig.js (across-cf-logpush-*)
     // - F5: config/products/f5/f5ELKConfig.js (across-f5-awaf-*)
-    index: process.env.ELK_INDEX || 'across-cf*',
+    index: process.env.ELK_INDEX || 'across-cf-*',
     apiKey: process.env.ELK_API_KEY || 'XzJlcm1wb0JQWGtnSXBHR0tEMFg6MERFYWFNTUFTTmxXOEhpdUg2aGwtUQ==',
     maxResults: parseInt(process.env.ELK_MAX_RESULTS) || 10000
   },

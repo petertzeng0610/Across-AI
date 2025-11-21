@@ -125,8 +125,8 @@ class ElkMCPClient {
             arguments: args
           }
         }),
-        // 增加超時時間到60秒，適應大數據量查詢
-        signal: AbortSignal.timeout(60000)
+        // 增加超時時間到5分鐘，適應大數據量查詢
+        signal: AbortSignal.timeout(300000)
       });
       
       if (!response.ok) {
@@ -264,13 +264,14 @@ class ElkMCPClient {
         }, {
           capabilities: {
             tools: {}
-          }
+          },
+          timeout: 300000  // 設定超時為 5 分鐘（300 秒）
         });
 
         // 設置連接超時
         const connectPromise = this.client.connect(transport);
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection timeout')), 15000)
+          setTimeout(() => reject(new Error('Connection timeout')), 60000)
         );
         
         // 連接到服務器（帶超時）
@@ -356,12 +357,14 @@ class ElkMCPClient {
             query_body: {
               query: { match_all: {} },
               size: 1,
-              timeout: '5s'
+              timeout: '60s'
             }
           }
+        }, {
+          timeout: 30000  // 30 秒超時（測試用）
         }),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection test timeout')), 5000)
+          setTimeout(() => reject(new Error('Connection test timeout')), 30000)
         )
       ]);
 
@@ -542,6 +545,9 @@ class ElkMCPClient {
           index: targetIndex,
           query_body: query
         }
+      }, {
+        timeout: 300000,  // 5 分鐘超時
+        resetTimeoutOnProgress: true  // 收到進度通知時重置超時
       });
 
       if (result.isError) {
@@ -701,6 +707,9 @@ class ElkMCPClient {
           index: targetIndex,
           query_body: query
         }
+      }, {
+        timeout: 300000,  // 5 分鐘超時
+        resetTimeoutOnProgress: true  // 收到進度通知時重置超時
       });
 
       if (result.isError) {
@@ -752,6 +761,8 @@ class ElkMCPClient {
             size: 1
           }
         }
+      }, {
+        timeout: 30000  // 30 秒超時（測試用）
       });
 
       const success = !testResult.isError;
