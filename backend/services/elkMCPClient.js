@@ -19,6 +19,18 @@ class ElkMCPClient {
     this.serverCapabilities = {};
   }
 
+  // 取得統一的 MCP 超時 (毫秒)
+  getTimeoutMs() {
+    const timeout = ELK_CONFIG?.mcp?.timeout;
+    return Number.isFinite(timeout) && timeout > 0 ? timeout : 300000;
+  }
+
+  // 取得 Elasticsearch 查詢用的超時字串 (如 "60s")
+  getTimeoutSecondsString() {
+    const seconds = Math.max(1, Math.ceil(this.getTimeoutMs() / 1000));
+    return `${seconds}s`;
+  }
+
   // 建立 HTTP 傳輸
   async createHttpTransport() {
     // 先測試 MCP Server 是否可用
@@ -87,7 +99,7 @@ class ElkMCPClient {
       
       const response = await fetch(pingUrl, {
         method: 'GET',
-        timeout: 5000
+        timeout: this.getTimeoutMs()
       });
       
       if (!response.ok) {
@@ -126,7 +138,7 @@ class ElkMCPClient {
           }
         }),
         // 增加超時時間到5分鐘，適應大數據量查詢
-        signal: AbortSignal.timeout(300000)
+        signal: AbortSignal.timeout(this.getTimeoutMs())
       });
       
       if (!response.ok) {
@@ -265,13 +277,13 @@ class ElkMCPClient {
           capabilities: {
             tools: {}
           },
-          timeout: 300000  // 設定超時為 5 分鐘（300 秒）
+          timeout: this.getTimeoutMs()  // 依環境變數設定超時
         });
 
         // 設置連接超時
         const connectPromise = this.client.connect(transport);
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection timeout')), 60000)
+          setTimeout(() => reject(new Error('Connection timeout')), this.getTimeoutMs())
         );
         
         // 連接到服務器（帶超時）
@@ -357,12 +369,12 @@ class ElkMCPClient {
             query_body: {
               query: { match_all: {} },
               size: 1,
-              timeout: '60s'
+              timeout: this.getTimeoutSecondsString()
             }
           }
         }),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection test timeout')), 30000)
+          setTimeout(() => reject(new Error('Connection test timeout')), this.getTimeoutMs())
         )
       ]);
 
@@ -553,7 +565,7 @@ class ElkMCPClient {
           query_body: query
         }
       }, undefined, {
-        timeout: 300000,  // 5 分鐘超時
+        timeout: this.getTimeoutMs(),  // 依環境變數設定超時
         resetTimeoutOnProgress: true  // 收到進度通知時重置超時
       });
 
@@ -715,7 +727,7 @@ class ElkMCPClient {
           query_body: query
         }
       }, undefined, {
-        timeout: 300000,  // 5 分鐘超時
+        timeout: this.getTimeoutMs(),  // 依環境變數設定超時
         resetTimeoutOnProgress: true  // 收到進度通知時重置超時
       });
 
