@@ -360,8 +360,6 @@ class ElkMCPClient {
               timeout: '60s'
             }
           }
-        }, {
-          timeout: 30000  // 30 秒超時（測試用）
         }),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Connection test timeout')), 30000)
@@ -761,8 +759,6 @@ class ElkMCPClient {
             size: 1
           }
         }
-      }, {
-        timeout: 30000  // 30 秒超時（測試用）
       });
 
       const success = !testResult.isError;
