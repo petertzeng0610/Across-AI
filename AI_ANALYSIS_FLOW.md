@@ -1266,18 +1266,25 @@ const CLOUDFLARE_FIELD_MAPPING = {
 **檔案位置**: `backend/config/elkConfig.js`
 
 ```javascript
+const DEFAULT_MCP_SERVER_URL = process.env.ELK_MCP_SERVER_URL || 'http://10.168.10.250:8080';
+
+const parsePositiveInt = (value, fallback) => {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
 const ELK_CONFIG = {
   // MCP 連接配置
   mcp: {
-    serverUrl: process.env.ELK_MCP_SERVER_URL || 'http://10.168.10.250:8080',
+    serverUrl: DEFAULT_MCP_SERVER_URL,
     protocol: process.env.ELK_MCP_PROTOCOL || 'proxy',  // 'proxy', 'stdio', 'http'
-    proxyCommand: process.env.MCP_PROXY_PATH || '/Users/peter/.local/bin/mcp-proxy',
+    proxyCommand: resolveMcpProxyCommand(), // 自動偵測 macOS/Linux/Windows，仍可用 MCP_PROXY_PATH 覆寫
     proxyArgs: [
       '--transport=streamablehttp',
-      'http://10.168.10.250:8080/mcp'
+      ensureMcpEndpoint(DEFAULT_MCP_SERVER_URL)
     ],
-    timeout: parseInt(process.env.ELK_MCP_TIMEOUT) || 30000,
-    retryAttempts: parseInt(process.env.ELK_MCP_RETRY) || 3
+    timeout: parsePositiveInt(process.env.ELK_MCP_TIMEOUT, 30000),
+    retryAttempts: parsePositiveInt(process.env.ELK_MCP_RETRY, 3)
   },
 
   // Elasticsearch 連接配置
@@ -1285,18 +1292,20 @@ const ELK_CONFIG = {
     host: process.env.ELK_HOST || 'https://10.168.10.250:9200',
     index: process.env.ELK_INDEX || 'across-cf-logpush-*',
     apiKey: process.env.ELK_API_KEY || 'your-api-key',
-    maxResults: parseInt(process.env.ELK_MAX_RESULTS) || 10000
+    maxResults: parsePositiveInt(process.env.ELK_MAX_RESULTS, 2)
   },
 
   // 查詢配置
   query: {
     defaultTimeRange: process.env.ELK_TIME_RANGE || '1h',
     maxTimeRange: process.env.ELK_MAX_TIME_RANGE || '24h',
-    attackThreshold: parseInt(process.env.ELK_ATTACK_THRESHOLD) || 20,
-    timeWindowSeconds: parseInt(process.env.ELK_TIME_WINDOW) || 10
+    attackThreshold: parsePositiveInt(process.env.ELK_ATTACK_THRESHOLD, 20),
+    timeWindowSeconds: parsePositiveInt(process.env.ELK_TIME_WINDOW, 10)
   }
 };
 ```
+
+> `resolveMcpProxyCommand()` 會掃描 PATH、`node_modules/.bin`、Homebrew、pipx、Windows Scripts 等常見安裝路徑，確保 mcp-proxy 在 macOS、Ubuntu 與 Windows 都能即時找到；同時 `ensureMcpEndpoint()` 會自動幫 serverUrl 補上 `/mcp` 後綴。
 
 ---
 

@@ -692,7 +692,8 @@ ELK_MCP_PROTOCOL=proxy  # 'proxy' 或 'stdio'
 ELK_HOST=https://10.168.10.250:9200
 ELK_INDEX=adasone-cf-logpush-*
 ELK_API_KEY=your_elasticsearch_api_key
-ELK_MAX_RESULTS=10000
+# 控制單次查詢最大回傳筆數，請務必於 .env 設定
+ELK_MAX_RESULTS=2
 
 # 查詢配置
 ELK_TIME_RANGE=1h
@@ -708,6 +709,7 @@ NODE_ENV=development
 **重要說明**：
 - Gemini API Key 可以在前端「AI 模型設定」頁面輸入，無需在後端設定
 - ELK 相關設定已寫在 `backend/config/elkConfig.js` 中
+- `ELK_MAX_RESULTS` 直接決定 MCP 搜尋回傳的最大筆數，務必透過 `.env` 管理，避免在程式碼中硬編碼
 - `.env` 檔案主要用於開發測試腳本，正常啟動不一定需要
 
 #### **前端配置** (localStorage)

@@ -714,6 +714,166 @@ class ElkMCPClient {
     console.log('✅ 客戶端狀態已重置');
   }
 
+  // 分批查詢 Elasticsearch（使用 from/size 分頁）
+  // options 可以包含: { indexPattern, fieldMapping, batchSize, maxBatches }
+  async queryElasticsearchBatched(timeRange = '1h', options = {}) {
+    const { 
+      indexPattern, 
+      fieldMapping, 
+      batchSize = 100,  // 每批查詢的記錄數
+      maxBatches = 10,  // 最多查詢的批次數（防止無限查詢）
+      ...filters 
+    } = options;
+    
+    try {
+      await this.ensureConnection();
+    } catch (error) {
+      console.log('⚠️ 單例連接失敗，嘗試使用新實例...');
+      throw new Error(`無法建立連接: ${error.message}`);
+    }
+
+    const targetIndex = indexPattern || ELK_CONFIG.elasticsearch.index;
+    const allHits = [];
+    let totalFound = 0;
+    let currentBatch = 0;
+    let from = 0;
+
+    console.log(`📦 開始分批查詢 Elasticsearch...`);
+    console.log(`批次大小: ${batchSize}, 最大批次數: ${maxBatches}`);
+
+    while (currentBatch < maxBatches) {
+      try {
+        // 建構單一批次的查詢
+        const baseQuery = this.buildElasticsearchQuery(timeRange, filters, fieldMapping, batchSize);
+        const batchQuery = {
+          ...baseQuery,
+          from: from,
+          size: batchSize
+        };
+
+        console.log(`📊 執行第 ${currentBatch + 1} 批查詢 (from: ${from}, size: ${batchSize})...`);
+
+        const requestTimeout = this.getTimeoutMs();
+        const callStart = Date.now();
+
+        // 執行單一批次查詢
+        const result = await this.client.callTool({
+          name: 'search',
+          arguments: {
+            index: targetIndex,
+            query_body: batchQuery
+          }
+        }, undefined, {
+          timeout: requestTimeout,
+          resetTimeoutOnProgress: true,
+          onprogress: (progress) => {
+            try {
+              const summary = JSON.stringify(progress);
+              console.log(`📡 批次 ${currentBatch + 1} 進度:`, summary.length > 200 ? `${summary.slice(0, 200)}...` : summary);
+            } catch {
+              console.log(`📡 批次 ${currentBatch + 1} 進度通知（無法序列化）`);
+            }
+          }
+        });
+
+        console.log(`✅ 批次 ${currentBatch + 1} 完成，耗時 ${Date.now() - callStart}ms`);
+
+        if (result.isError) {
+          throw new Error(`Elasticsearch 查詢錯誤: ${result.content[0]?.text || 'Unknown error'}`);
+        }
+
+        // 解析回應
+        const responseText = result.content[0]?.text || '';
+        const dataText = result.content[1]?.text || responseText;
+        
+        let batchHits = [];
+        let batchTotal = 0;
+
+        try {
+          const records = JSON.parse(dataText);
+          
+          if (Array.isArray(records)) {
+            // 直接是記錄陣列
+            batchHits = records;
+            batchTotal = records.length;
+          } else if (records.hits?.hits) {
+            // 標準 Elasticsearch 格式
+            batchHits = records.hits.hits;
+            batchTotal = records.hits.total?.value || records.hits.total || batchHits.length;
+          } else {
+            // 其他格式，嘗試提取
+            batchHits = [];
+            batchTotal = 0;
+          }
+        } catch (parseError) {
+          console.warn(`⚠️ 批次 ${currentBatch + 1} 回應解析失敗:`, parseError.message);
+          batchHits = [];
+          batchTotal = 0;
+        }
+
+        // 如果第一批，記錄總數
+        if (currentBatch === 0) {
+          totalFound = batchTotal;
+          console.log(`📊 總共找到 ${totalFound} 筆記錄`);
+        }
+
+        // 如果這批沒有資料，停止查詢
+        if (batchHits.length === 0) {
+          console.log(`✅ 批次 ${currentBatch + 1} 沒有更多資料，停止查詢`);
+          break;
+        }
+
+        // 將這批資料加入總結果
+        const formattedHits = batchHits.map(hit => {
+          const source = hit._source || hit;
+          return {
+            id: hit._id || source.RayID || source.id || `${currentBatch}-${allHits.length}`,
+            source: source,
+            timestamp: source["@timestamp"]
+          };
+        });
+
+        allHits.push(...formattedHits);
+        console.log(`✅ 批次 ${currentBatch + 1} 取得 ${formattedHits.length} 筆記錄，累計 ${allHits.length} 筆`);
+
+        // 如果這批資料少於批次大小，表示已經是最後一批
+        if (batchHits.length < batchSize) {
+          console.log(`✅ 已取得所有資料（最後一批）`);
+          break;
+        }
+
+        // 準備下一批
+        from += batchSize;
+        currentBatch++;
+
+        // 如果已取得足夠的資料（達到總數），停止查詢
+        if (allHits.length >= totalFound) {
+          console.log(`✅ 已取得所有 ${totalFound} 筆記錄`);
+          break;
+        }
+
+      } catch (error) {
+        console.error(`❌ 批次 ${currentBatch + 1} 查詢失敗:`, error.message);
+        // 如果已經有資料，返回部分結果；否則拋出錯誤
+        if (allHits.length > 0) {
+          console.warn(`⚠️ 返回部分結果（${allHits.length} 筆）`);
+          break;
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    console.log(`✅ 分批查詢完成，共取得 ${allHits.length} 筆記錄（${currentBatch + 1} 批次）`);
+
+    return {
+      total: totalFound,
+      hits: allHits,
+      batches: currentBatch + 1,
+      batchSize: batchSize
+    };
+  }
+
   // 使用新實例執行查詢（回退機制）
   async queryWithNewInstance(timeRange = '1h', options = {}) {
     console.log('🆕 使用新實例執行 Elasticsearch 查詢...');

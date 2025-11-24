@@ -119,12 +119,14 @@ interface WAFRiskData {
 ### ELK 配置 (`backend/config/elkConfig.js`)
 
 ```javascript
+const DEFAULT_MCP_SERVER_URL = process.env.ELK_MCP_SERVER_URL || 'http://10.168.10.250:8080';
+
 const ELK_CONFIG = {
   mcp: {
-    serverUrl: 'http://10.168.10.250:8080',
+    serverUrl: DEFAULT_MCP_SERVER_URL,
     protocol: 'proxy',
-    proxyCommand: process.env.HOME + '/.local/bin/mcp-proxy',
-    proxyArgs: ['--transport=streamablehttp', 'http://10.168.10.250:8080/mcp'],
+    proxyCommand: resolveMcpProxyCommand(), // 自動偵測 macOS/Linux/Windows 的 mcp-proxy
+    proxyArgs: ['--transport=streamablehttp', ensureMcpEndpoint(DEFAULT_MCP_SERVER_URL)],
     timeout: 30000,
     retryAttempts: 3
   },
