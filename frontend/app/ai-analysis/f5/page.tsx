@@ -1031,12 +1031,38 @@ export default function F5AIAnalysisPage() {
             <CardContent className="p-4">
               <div className="flex items-center gap-2 mb-2">
                 <Calendar className="w-4 h-4 text-cyan-400" />
-                <span className="text-sm font-semibold text-slate-300">時間範圍</span>
+                <span className="text-sm font-semibold text-slate-300">分析時間範圍</span>
               </div>
               <div className="text-2xl font-bold text-cyan-400 mb-1">
                 {getTimeRangeLabel(selectedTimeRange)}
               </div>
-              {analysisMetadata.timeRange.start && (
+              {analysisMetadata.timeRange.display?.start && (
+                <div className="text-xs text-slate-400 space-y-0.5">
+                  <div>{formatDateTime(analysisMetadata.timeRange.display.start)}</div>
+                  <div className="text-center">至</div>
+                  <div>{formatDateTime(analysisMetadata.timeRange.display.end)}</div>
+                  
+                  {/* 顯示實際日誌時間範圍（如果與預期不同） */}
+                  {analysisMetadata.timeRange.actual && analysisMetadata.timeRange.hasLogs && (
+                    <div className="mt-2 pt-2 border-t border-slate-700/50">
+                      <div className="text-[10px] text-slate-500 mb-1">實際日誌範圍</div>
+                      <div className="text-[10px]">{formatDateTime(analysisMetadata.timeRange.actual.start)}</div>
+                      <div className="text-center text-[10px]">至</div>
+                      <div className="text-[10px]">{formatDateTime(analysisMetadata.timeRange.actual.end)}</div>
+                    </div>
+                  )}
+                  
+                  {/* 顯示無日誌警告 */}
+                  {analysisMetadata.timeRange.hasLogs === false && (
+                    <div className="mt-2 text-[10px] text-amber-400 flex items-center gap-1">
+                      <span>⚠️</span>
+                      <span>此時間範圍內無日誌資料</span>
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* 向後兼容：如果沒有 display 欄位，使用舊的 start/end */}
+              {!analysisMetadata.timeRange.display && analysisMetadata.timeRange.start && (
                 <div className="text-xs text-slate-400 space-y-0.5">
                   <div>{formatDateTime(analysisMetadata.timeRange.start)}</div>
                   <div className="text-center">至</div>

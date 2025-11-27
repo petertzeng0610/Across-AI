@@ -105,16 +105,15 @@ class F5WAFRiskService {
       const geoAnalysis = this.analyzeGeoDistribution(logEntries);
       const assetAnalysis = this.analyzeAffectedAssets(logEntries);
       
-      // 計算時間範圍
-      const timestamps = logEntries
-        .map(log => log.timestamp)
-        .filter(t => t)
-        .map(t => new Date(t).getTime());
+      // 計算時間範圍（使用混合方案）
+      const timeRange_result = this.calculateTimeRangeWithFallback(timeRange, logEntries);
       
-      const timeRange_result = {
-        start: timestamps.length > 0 ? new Date(Math.min(...timestamps)).toISOString() : new Date().toISOString(),
-        end: timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : new Date().toISOString()
-      };
+      console.log(`📅 時間範圍資訊:`);
+      console.log(`   預期範圍: ${this.formatTimeTaipei(timeRange_result.display.start)} ~ ${this.formatTimeTaipei(timeRange_result.display.end)}`);
+      if (timeRange_result.actual) {
+        console.log(`   實際日誌: ${this.formatTimeTaipei(timeRange_result.actual.start)} ~ ${this.formatTimeTaipei(timeRange_result.actual.end)}`);
+      }
+      console.log(`   日誌數量: ${timeRange_result.logCount} 筆`);
       
       console.log('\n✅ ===== F5 WAF 風險分析完成 =====\n');
       
@@ -201,6 +200,21 @@ class F5WAFRiskService {
       countrySource = 'none';
     }
     
+    // 處理時間戳記（支援 Unix timestamp 和 ISO 8601）
+    const rawTimestamp = rawLog[this.fieldMapping.timestamp.elk_field];
+    
+    let timestamp;
+    if (typeof rawTimestamp === 'number') {
+      // Unix timestamp (秒或毫秒)
+      timestamp = new Date(rawTimestamp > 10000000000 ? rawTimestamp : rawTimestamp * 1000).toISOString();
+    } else if (typeof rawTimestamp === 'string') {
+      // ISO 8601 格式
+      timestamp = new Date(rawTimestamp).toISOString();
+    } else {
+      // 預設當前時間
+      timestamp = new Date().toISOString();
+    }
+    
     return {
       // 基本資訊
       clientIP: clientIP,
@@ -245,14 +259,120 @@ class F5WAFRiskService {
       policyApplyDate: rawLog[this.fieldMapping.policy_apply_date?.elk_field],
       webApplicationName: rawLog[this.fieldMapping.web_application_name?.elk_field],
       
-      // 時間資訊
-      timestamp: rawLog[this.fieldMapping.timestamp.elk_field],
+      // 時間資訊（使用處理後的 timestamp）
+      timestamp: timestamp,
       date_time: rawLog[this.fieldMapping.date_time?.elk_field],
       
       // 其他資訊
       support_id: rawLog[this.fieldMapping.support_id?.elk_field],
       session_id: rawLog[this.fieldMapping.session_id?.elk_field],
       geoip: rawLog.geoip || rawLog[this.fieldMapping.geoip?.elk_field]
+    };
+  }
+  
+  /**
+   * 格式化時間（台灣時區 UTC+8）
+   */
+  formatTimeTaipei(isoString) {
+    return new Date(isoString).toLocaleString('zh-TW', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZone: 'Asia/Taipei',
+      hour12: false
+    });
+  }
+  
+  /**
+   * 格式化日期（台灣時區）
+   */
+  formatDateTaipei(isoString) {
+    return new Date(isoString).toLocaleDateString('zh-TW', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: 'Asia/Taipei'
+    });
+  }
+  
+  /**
+   * 計算時間範圍（混合方案：同時返回預期和實際時間範圍）
+   * @param {string|object} timeRangeParam - 使用者選擇的時間範圍（如 "24h" 或 {start, end}）
+   * @param {array} logEntries - 日誌條目
+   * @returns {object} 完整的時間範圍資訊
+   */
+  calculateTimeRangeWithFallback(timeRangeParam, logEntries) {
+    // 1. 計算預期的時間範圍（基於使用者選擇）
+    let expectedStart, expectedEnd;
+    
+    if (typeof timeRangeParam === 'string') {
+      // 預設時間範圍（如 "24h", "7d"）
+      expectedEnd = new Date();
+      
+      const timeRangeMapping = {
+        '1h': 1 * 60 * 60 * 1000,
+        '6h': 6 * 60 * 60 * 1000,
+        '12h': 12 * 60 * 60 * 1000,
+        '24h': 24 * 60 * 60 * 1000,
+        '7d': 7 * 24 * 60 * 60 * 1000,
+        '30d': 30 * 24 * 60 * 60 * 1000
+      };
+      
+      const duration = timeRangeMapping[timeRangeParam] || 24 * 60 * 60 * 1000;
+      expectedStart = new Date(expectedEnd.getTime() - duration);
+      
+    } else if (timeRangeParam && timeRangeParam.start && timeRangeParam.end) {
+      // 自定義時間範圍
+      expectedStart = new Date(timeRangeParam.start);
+      expectedEnd = new Date(timeRangeParam.end);
+    } else {
+      // Fallback：預設 24 小時
+      expectedEnd = new Date();
+      expectedStart = new Date(expectedEnd.getTime() - 24 * 60 * 60 * 1000);
+    }
+    
+    // 2. 計算實際日誌時間範圍
+    const timestamps = logEntries
+      .map(log => log.timestamp)
+      .filter(t => t)
+      .map(t => new Date(t).getTime())
+      .filter(t => !isNaN(t));
+    
+    let actualStart = null;
+    let actualEnd = null;
+    
+    if (timestamps.length > 0) {
+      actualStart = new Date(Math.min(...timestamps)).toISOString();
+      actualEnd = new Date(Math.max(...timestamps)).toISOString();
+    }
+    
+    // 3. 返回完整的時間範圍資訊
+    return {
+      // 用於顯示的時間範圍（優先使用預期時間）
+      display: {
+        start: expectedStart.toISOString(),
+        end: expectedEnd.toISOString()
+      },
+      // 預期的時間範圍（基於使用者選擇）
+      expected: {
+        start: expectedStart.toISOString(),
+        end: expectedEnd.toISOString()
+      },
+      // 實際日誌的時間範圍（如果有日誌）
+      actual: actualStart && actualEnd ? {
+        start: actualStart,
+        end: actualEnd
+      } : null,
+      // 是否有日誌
+      hasLogs: timestamps.length > 0,
+      // 日誌數量
+      logCount: logEntries.length,
+      // 向後兼容：保留舊的 start/end 欄位
+      start: expectedStart.toISOString(),
+      end: expectedEnd.toISOString()
     };
   }
   
@@ -770,7 +890,7 @@ ${attackStatisticsText}
   // 生成 Fallback 風險資料（AI 解析失敗時使用）
   generateFallbackRisks(analysisData) {
     const risks = [];
-    const { sqlInjection, xssAttacks, commandExecution, botTraffic, sessionAttacks } = analysisData;
+    const { sqlInjection, xssAttacks, commandExecution, botTraffic, sessionAttacks, timeRange } = analysisData;
     
     if (sqlInjection.count > 0) {
       const topCountry = sqlInjection.topCountries?.[0];
@@ -787,8 +907,8 @@ ${attackStatisticsText}
         tags: ['Internet Exposed', 'High Volume', 'F5 多層次判斷'],
         description: `F5 Advanced WAF 多層次判斷模型檢測到 ${sqlInjection.count} 次 SQL 注入攻擊嘗試，其中 ${sqlInjection.highRisk} 次為高風險攻擊。`,
         aiInsight: `在分析時間範圍內，F5 Advanced WAF 多層次判斷模型檢測到 ${sqlInjection.count} 次 SQL 注入攻擊嘗試，其中 ${sqlInjection.highRisk} 次被 Level 1 判定為高風險攻擊（violation_rating ≥ 70，且觸發 F5 攻擊簽章）。根據 Level 2 威脅評分機制，這些攻擊展現出明顯的惡意特徵。Level 3 攻擊類型匹配確認為 SQL Injection（OWASP A03:2021），攻擊手法包含 UNION 查詢、時間延遲注入等技術。主要攻擊來自 ${topCountry?.item || '未知地區'}（${topCountry?.count || 0} 次），Top 攻擊 IP 為 ${topIP?.item || '未知'}（${topIP?.count || 0} 次）。攻擊目標集中於 ${topTarget?.item || '多個端點'}（${topTarget?.count || 0} 次）。共影響 ${sqlInjection.affectedAssets} 個資產。建議立即啟用 F5 Advanced WAF 的 SQL 注入防護簽章（Signature Set 200010000 系列），將 violation_rating 閾值設定為 50 以上自動阻擋，並啟用學習模式以優化防護規則。`,
-        createdDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        createdDate: timeRange ? this.formatDateTaipei(timeRange.start) : new Date().toLocaleDateString('zh-TW'),
+        updatedDate: timeRange ? this.formatDateTaipei(timeRange.end) : new Date().toLocaleDateString('zh-TW'),
         exploitInWild: false,
         internetExposed: true,
         confirmedExploitable: false,
@@ -835,8 +955,8 @@ ${attackStatisticsText}
         tags: ['Internet Exposed', 'F5 多層次判斷'],
         description: `F5 Advanced WAF 檢測到 ${xssAttacks.count} 次 XSS 攻擊嘗試。`,
         aiInsight: `在分析時間範圍內，F5 Advanced WAF 多層次判斷模型檢測到 ${xssAttacks.count} 次 XSS（跨站腳本）攻擊嘗試，其中 ${xssAttacks.highRisk} 次被判定為高風險攻擊。Level 1 判斷顯示這些攻擊觸發了 F5 XSS 防護簽章，violation_rating 評分達到警戒水平。Level 3 攻擊類型匹配確認為 Cross-Site Scripting（OWASP A03:2021），攻擊手法包含 <script> 標籤注入、事件處理器注入（如 onerror、onload）等。主要攻擊來自 ${topCountry?.item || '未知地區'}（${topCountry?.count || 0} 次），Top 攻擊 IP 為 ${topIP?.item || '未知'}（${topIP?.count || 0} 次）。攻擊目標為 ${topTarget?.item || '多個端點'}（${topTarget?.count || 0} 次）。共影響 ${xssAttacks.affectedAssets} 個資產。建議立即啟用 F5 Advanced WAF 的 XSS 防護規則並配置內容安全策略（CSP），同時檢查受影響端點的輸入驗證與輸出編碼機制。`,
-        createdDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        createdDate: timeRange ? this.formatDateTaipei(timeRange.start) : new Date().toLocaleDateString('zh-TW'),
+        updatedDate: timeRange ? this.formatDateTaipei(timeRange.end) : new Date().toLocaleDateString('zh-TW'),
         exploitInWild: false,
         internetExposed: true,
         confirmedExploitable: false,
@@ -878,8 +998,8 @@ ${attackStatisticsText}
         tags: ['Critical', 'Internet Exposed', 'F5 多層次判斷'],
         description: `F5 Advanced WAF 檢測到 ${commandExecution.count} 次命令執行攻擊嘗試。`,
         aiInsight: `⚠️ 嚴重警告：在分析時間範圍內，F5 Advanced WAF 多層次判斷模型檢測到 ${commandExecution.count} 次遠程命令執行（RCE）攻擊嘗試，其中 ${commandExecution.highRisk} 次為極高風險攻擊。Level 1 判斷顯示所有攻擊均觸發了 F5 命令執行防護簽章，violation_rating 評分達到 Critical 等級（≥ 90）。Level 2 威脅評分顯示這些攻擊具有明確的惡意意圖和高度危害性。Level 3 攻擊類型匹配確認為 Remote Command Execution / Code Injection（OWASP A03:2021），攻擊手法包含 Shell 命令注入、系統命令執行等技術。主要攻擊來自 ${topCountry?.item || '未知地區'}（${topCountry?.count || 0} 次），Top 攻擊 IP 為 ${topIP?.item || '未知'}（${topIP?.count || 0} 次），攻擊目標為 ${topTarget?.item || '多個端點'}（${topTarget?.count || 0} 次）。共影響 ${commandExecution.affectedAssets} 個資產。此類攻擊已被確認在野外利用，建議立即阻擋來源 IP、啟用 F5 Advanced WAF 的命令執行防護簽章（Signature Set 200020000 系列），並緊急檢查受影響端點的代碼執行邏輯。`,
-        createdDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        createdDate: timeRange ? this.formatDateTaipei(timeRange.start) : new Date().toLocaleDateString('zh-TW'),
+        updatedDate: timeRange ? this.formatDateTaipei(timeRange.end) : new Date().toLocaleDateString('zh-TW'),
         exploitInWild: true,
         internetExposed: true,
         confirmedExploitable: true,

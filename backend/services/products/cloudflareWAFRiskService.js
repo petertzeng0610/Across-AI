@@ -12,7 +12,13 @@ const {
   isRealSecurityThreat,
   calculateValidAvgScore,
   RECOMMENDED_THRESHOLDS,
-  WAF_SCORE_CLASSIFICATION
+  WAF_SCORE_CLASSIFICATION,
+  analyzeThreatLevel,
+  classifySecurityAction,
+  analyzeURIPattern,
+  analyzeUserAgent,
+  hasLowWAFScore,
+  identifyAttackType
 } = require('../../config/products/cloudflare/cloudflareStandards');
 
 class CloudflareWAFRiskService {
@@ -72,16 +78,15 @@ class CloudflareWAFRiskService {
       const geoAnalysis = this.analyzeGeoDistribution(logEntries);
       const assetAnalysis = this.analyzeAffectedAssets(logEntries);
       
-      // 計算時間範圍
-      const timestamps = logEntries
-        .map(log => log.timestamp)
-        .filter(t => t)
-        .map(t => new Date(t).getTime());
+      // 計算時間範圍（使用混合方案）
+      const timeRange_result = this.calculateTimeRangeWithFallback(timeRange, logEntries);
       
-      const timeRange_result = {
-        start: timestamps.length > 0 ? new Date(Math.min(...timestamps)).toISOString() : new Date().toISOString(),
-        end: timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : new Date().toISOString()
-      };
+      console.log(`📅 時間範圍資訊:`);
+      console.log(`   預期範圍: ${this.formatTimeTaipei(timeRange_result.display.start)} ~ ${this.formatTimeTaipei(timeRange_result.display.end)}`);
+      if (timeRange_result.actual) {
+        console.log(`   實際日誌: ${this.formatTimeTaipei(timeRange_result.actual.start)} ~ ${this.formatTimeTaipei(timeRange_result.actual.end)}`);
+      }
+      console.log(`   日誌數量: ${timeRange_result.logCount} 筆`);
       
       console.log('\n✅ ===== Cloudflare WAF 風險分析完成 =====\n');
       
@@ -106,6 +111,21 @@ class CloudflareWAFRiskService {
   
   // 解析 Cloudflare 日誌（使用 cloudflare-field-mapping）
   parseCloudflareLog(rawLog) {
+    // 處理時間戳記（支援多種格式）
+    const rawTimestamp = rawLog[this.fieldMapping.edge_start_timestamp.elk_field];
+    let timestamp;
+    
+    if (typeof rawTimestamp === 'number') {
+      // Unix Timestamp（毫秒）
+      timestamp = new Date(rawTimestamp).toISOString();
+    } else if (typeof rawTimestamp === 'string') {
+      // ISO 8601 格式
+      timestamp = new Date(rawTimestamp).toISOString();
+    } else {
+      // 預設使用當前時間
+      timestamp = new Date().toISOString();
+    }
+    
     return {
       rayId: rawLog[this.fieldMapping.ray_id.elk_field],
       clientIP: rawLog[this.fieldMapping.client_ip.elk_field],
@@ -118,98 +138,273 @@ class CloudflareWAFRiskService {
       wafSQLiScore: rawLog[this.fieldMapping.waf_sqli_attack_score.elk_field],
       wafXSSScore: rawLog[this.fieldMapping.waf_xss_attack_score.elk_field],
       wafRCEScore: rawLog[this.fieldMapping.waf_rce_attack_score.elk_field],
+      
+      // 安全相關欄位（新增）
       securityAction: rawLog[this.fieldMapping.security_action.elk_field],
-      securityRule: rawLog[this.fieldMapping.security_rule_id.elk_field],  // 修復：security_rule_description → security_rule_id
-      edgeHost: rawLog[this.fieldMapping.client_request_host.elk_field],    // 修復：edge_request_host → client_request_host
-      timestamp: rawLog[this.fieldMapping.edge_start_timestamp.elk_field]
+      securityActions: rawLog[this.fieldMapping.security_actions.elk_field] || [],
+      securityRule: rawLog[this.fieldMapping.security_rule_id.elk_field],
+      securityRuleDescription: rawLog[this.fieldMapping.security_rule_description.elk_field],
+      securityRuleIDs: rawLog[this.fieldMapping.security_rule_ids.elk_field] || [],
+      securitySources: rawLog[this.fieldMapping.security_sources.elk_field] || [],
+      
+      // 資產相關
+      zoneName: rawLog[this.fieldMapping.zone_name.elk_field],
+      edgeHost: rawLog[this.fieldMapping.client_request_host.elk_field],
+      
+      // 時間戳記（已格式化為 ISO 8601）
+      timestamp: timestamp
     };
   }
   
-  // 分析 SQL 注入（使用 Cloudflare 官方標準）
-  // 官方定義：分數 1-20 = Attack, 21-50 = Likely Attack
-  analyzeSQLInjection(logEntries) {
-    // 過濾：排除內部端點 + 有效分數 + 分數 <= 50
-    const sqliLogs = logEntries.filter(log => 
-      !isCloudflareInternalEndpoint(log.requestURI) &&  // ✅ 排除 Cloudflare 內部服務
-      (
-        (isValidWAFScore(log.wafSQLiScore) && log.wafSQLiScore <= 50) ||  // ✅ 有效分數 1-50
-        (log.securityRule && log.securityRule.toLowerCase().includes('sql'))  // 或觸發 SQL 規則
-      )
-    );
+  /**
+   * 計算時間範圍（混合方案：同時返回預期和實際時間範圍）
+   * @param {string|object} timeRangeParam - 使用者選擇的時間範圍（如 "24h" 或 {start, end}）
+   * @param {array} logEntries - 日誌條目
+   * @returns {object} 完整的時間範圍資訊
+   */
+  calculateTimeRangeWithFallback(timeRangeParam, logEntries) {
+    // 1. 計算預期的時間範圍（基於使用者選擇）
+    let expectedStart, expectedEnd;
     
-    // 高風險：分數 1-20（官方 Attack 級別）
-    const highRiskLogs = sqliLogs.filter(log => 
-      isValidWAFScore(log.wafSQLiScore) && 
-      log.wafSQLiScore >= 1 && 
-      log.wafSQLiScore <= RECOMMENDED_THRESHOLDS.HIGH  // <= 20
-    );
+    if (typeof timeRangeParam === 'string') {
+      // 預設時間範圍（如 "24h", "7d"）
+      expectedEnd = new Date();
+      
+      const timeRangeMapping = {
+        '1h': 1 * 60 * 60 * 1000,
+        '6h': 6 * 60 * 60 * 1000,
+        '12h': 12 * 60 * 60 * 1000,
+        '24h': 24 * 60 * 60 * 1000,
+        '7d': 7 * 24 * 60 * 60 * 1000,
+        '30d': 30 * 24 * 60 * 60 * 1000
+      };
+      
+      const duration = timeRangeMapping[timeRangeParam] || 24 * 60 * 60 * 1000;
+      expectedStart = new Date(expectedEnd.getTime() - duration);
+      
+    } else if (timeRangeParam && timeRangeParam.start && timeRangeParam.end) {
+      // 自定義時間範圍
+      expectedStart = new Date(timeRangeParam.start);
+      expectedEnd = new Date(timeRangeParam.end);
+    } else {
+      // Fallback：預設 24 小時
+      expectedEnd = new Date();
+      expectedStart = new Date(expectedEnd.getTime() - 24 * 60 * 60 * 1000);
+    }
+    
+    // 2. 計算實際日誌時間範圍
+    const timestamps = logEntries
+      .map(log => log.timestamp)
+      .filter(t => t)
+      .map(t => new Date(t).getTime())
+      .filter(t => !isNaN(t));
+    
+    let actualStart = null;
+    let actualEnd = null;
+    
+    if (timestamps.length > 0) {
+      actualStart = new Date(Math.min(...timestamps)).toISOString();
+      actualEnd = new Date(Math.max(...timestamps)).toISOString();
+    }
+    
+    // 3. 返回完整的時間範圍資訊
+    return {
+      // 用於顯示的時間範圍（優先使用預期時間）
+      display: {
+        start: expectedStart.toISOString(),
+        end: expectedEnd.toISOString()
+      },
+      // 預期的時間範圍（基於使用者選擇）
+      expected: {
+        start: expectedStart.toISOString(),
+        end: expectedEnd.toISOString()
+      },
+      // 實際日誌的時間範圍（如果有日誌）
+      actual: actualStart && actualEnd ? {
+        start: actualStart,
+        end: actualEnd
+      } : null,
+      // 是否有日誌
+      hasLogs: timestamps.length > 0,
+      // 日誌數量
+      logCount: logEntries.length,
+      // 向後兼容：保留舊的 start/end 欄位
+      start: expectedStart.toISOString(),
+      end: expectedEnd.toISOString()
+    };
+  }
+  
+  /**
+   * 格式化時間（台灣時區 UTC+8）
+   */
+  formatTimeTaipei(isoString) {
+    return new Date(isoString).toLocaleString('zh-TW', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZone: 'Asia/Taipei',
+      hour12: false
+    });
+  }
+  
+  // 分析 SQL 注入（使用新的多層判斷邏輯）
+  analyzeSQLInjection(logEntries) {
+    // 使用新的多層判斷邏輯
+    const sqliLogs = logEntries.filter(log => {
+      // 排除 Cloudflare 內部端點
+      if (isCloudflareInternalEndpoint(log.requestURI)) {
+        return false;
+      }
+      
+      // 條件 1：WAF SQLi Score < 20（確定攻擊）
+      if (isValidWAFScore(log.wafSQLiScore) && log.wafSQLiScore < 20) {
+        return true;
+      }
+      
+      // 條件 2：SecurityRule 觸發 SQL 相關規則
+      if (log.securityRule && log.securityRule.toLowerCase().includes('sql')) {
+        return true;
+      }
+      
+      // 條件 3：使用多層判斷邏輯
+      const analysis = analyzeThreatLevel(log);
+      if (analysis.isThreat && analysis.attackType && analysis.attackType.includes('SQL')) {
+        return true;
+      }
+      
+      return false;
+    });
+    
+    // 分類：已阻擋 vs 未阻擋
+    const blockedLogs = sqliLogs.filter(log => {
+      const analysis = analyzeThreatLevel(log);
+      return analysis.isBlocked;
+    });
+    
+    const unblockedLogs = sqliLogs.filter(log => {
+      const analysis = analyzeThreatLevel(log);
+      return !analysis.isBlocked;
+    });
     
     return {
       count: sqliLogs.length,
-      highRisk: highRiskLogs.length,
-      topIPs: this.getTopN(sqliLogs, 'clientIP', 10),
+      blocked: blockedLogs.length,
+      unblocked: unblockedLogs.length,
+      highRisk: unblockedLogs.length,  // 未阻擋 = 高風險
+      topIPs: this.getTopIPsWithCountry(sqliLogs, 5),  // Top 5 IP + 國家
       topTargets: this.getTopN(sqliLogs, 'requestURI', 10),
       topCountries: this.getTopN(sqliLogs, 'clientCountry', 5),
-      affectedAssets: new Set(sqliLogs.map(log => log.edgeHost).filter(h => h)).size,
-      avgScore: calculateValidAvgScore(sqliLogs, 'wafSQLiScore')  // ✅ 只計算有效分數
+      affectedAssets: this.groupByZoneName(sqliLogs),  // 按 ZoneName 分組
+      avgScore: calculateValidAvgScore(sqliLogs, 'wafSQLiScore')
     };
   }
   
-  // 分析 XSS 攻擊（使用 Cloudflare 官方標準）
+  // 分析 XSS 攻擊（使用新的多層判斷邏輯）
   analyzeXSSAttacks(logEntries) {
-    const xssLogs = logEntries.filter(log => 
-      !isCloudflareInternalEndpoint(log.requestURI) &&  // ✅ 排除內部端點
-      (
-        (isValidWAFScore(log.wafXSSScore) && log.wafXSSScore <= 50) ||  // ✅ 有效分數 1-50
-        (log.securityRule && log.securityRule.toLowerCase().includes('xss')) ||
-        (log.requestURI && (log.requestURI.includes('<script') || log.requestURI.includes('javascript:')))
-      )
-    );
+    const xssLogs = logEntries.filter(log => {
+      if (isCloudflareInternalEndpoint(log.requestURI)) {
+        return false;
+      }
+      
+      // 條件 1：WAF XSS Score < 20
+      if (isValidWAFScore(log.wafXSSScore) && log.wafXSSScore < 20) {
+        return true;
+      }
+      
+      // 條件 2：SecurityRule 觸發 XSS 規則
+      if (log.securityRule && log.securityRule.toLowerCase().includes('xss')) {
+        return true;
+      }
+      
+      // 條件 3：URI 包含 XSS pattern
+      if (log.requestURI && (log.requestURI.includes('<script') || log.requestURI.includes('javascript:'))) {
+        return true;
+      }
+      
+      // 條件 4：多層判斷邏輯
+      const analysis = analyzeThreatLevel(log);
+      if (analysis.isThreat && analysis.attackType && analysis.attackType.includes('XSS')) {
+        return true;
+      }
+      
+      return false;
+    });
     
-    // 高風險：分數 1-20（官方 Attack 級別）
-    const highRiskLogs = xssLogs.filter(log => 
-      isValidWAFScore(log.wafXSSScore) && 
-      log.wafXSSScore >= 1 && 
-      log.wafXSSScore <= RECOMMENDED_THRESHOLDS.HIGH  // <= 20
-    );
+    // 分類：已阻擋 vs 未阻擋
+    const blockedLogs = xssLogs.filter(log => {
+      const analysis = analyzeThreatLevel(log);
+      return analysis.isBlocked;
+    });
+    
+    const unblockedLogs = xssLogs.filter(log => {
+      const analysis = analyzeThreatLevel(log);
+      return !analysis.isBlocked;
+    });
     
     return {
       count: xssLogs.length,
-      highRisk: highRiskLogs.length,
-      topIPs: this.getTopN(xssLogs, 'clientIP', 10),
+      blocked: blockedLogs.length,
+      unblocked: unblockedLogs.length,
+      highRisk: unblockedLogs.length,
+      topIPs: this.getTopIPsWithCountry(xssLogs, 5),
       topTargets: this.getTopN(xssLogs, 'requestURI', 10),
       topCountries: this.getTopN(xssLogs, 'clientCountry', 5),
-      affectedAssets: new Set(xssLogs.map(log => log.edgeHost).filter(h => h)).size,
-      avgScore: calculateValidAvgScore(xssLogs, 'wafXSSScore')  // ✅ 只計算有效分數
+      affectedAssets: this.groupByZoneName(xssLogs),
+      avgScore: calculateValidAvgScore(xssLogs, 'wafXSSScore')
     };
   }
   
-  // 分析 RCE 攻擊（使用 Cloudflare 官方標準）
+  // 分析 RCE 攻擊（使用新的多層判斷邏輯）
   analyzeRCEAttacks(logEntries) {
-    const rceLogs = logEntries.filter(log => 
-      !isCloudflareInternalEndpoint(log.requestURI) &&  // ✅ 排除內部端點
-      (
-        (isValidWAFScore(log.wafRCEScore) && log.wafRCEScore <= 50) ||  // ✅ 有效分數 1-50
-        (log.securityRule && (log.securityRule.toLowerCase().includes('rce') || 
-                             log.securityRule.toLowerCase().includes('remote code')))
-      )
-    );
+    const rceLogs = logEntries.filter(log => {
+      if (isCloudflareInternalEndpoint(log.requestURI)) {
+        return false;
+      }
+      
+      // 條件 1：WAF RCE Score < 20
+      if (isValidWAFScore(log.wafRCEScore) && log.wafRCEScore < 20) {
+        return true;
+      }
+      
+      // 條件 2：SecurityRule 觸發 RCE 規則
+      if (log.securityRule && (log.securityRule.toLowerCase().includes('rce') || 
+                               log.securityRule.toLowerCase().includes('remote code'))) {
+        return true;
+      }
+      
+      // 條件 3：多層判斷邏輯
+      const analysis = analyzeThreatLevel(log);
+      if (analysis.isThreat && analysis.attackType && analysis.attackType.includes('RCE')) {
+        return true;
+      }
+      
+      return false;
+    });
     
-    // 高風險：分數 1-20（官方 Attack 級別）
-    const highRiskLogs = rceLogs.filter(log => 
-      isValidWAFScore(log.wafRCEScore) && 
-      log.wafRCEScore >= 1 && 
-      log.wafRCEScore <= RECOMMENDED_THRESHOLDS.HIGH  // <= 20
-    );
+    // 分類：已阻擋 vs 未阻擋
+    const blockedLogs = rceLogs.filter(log => {
+      const analysis = analyzeThreatLevel(log);
+      return analysis.isBlocked;
+    });
+    
+    const unblockedLogs = rceLogs.filter(log => {
+      const analysis = analyzeThreatLevel(log);
+      return !analysis.isBlocked;
+    });
     
     return {
       count: rceLogs.length,
-      highRisk: highRiskLogs.length,
-      topIPs: this.getTopN(rceLogs, 'clientIP', 10),
+      blocked: blockedLogs.length,
+      unblocked: unblockedLogs.length,
+      highRisk: unblockedLogs.length,
+      topIPs: this.getTopIPsWithCountry(rceLogs, 5),
       topTargets: this.getTopN(rceLogs, 'requestURI', 10),
       topCountries: this.getTopN(rceLogs, 'clientCountry', 5),
-      affectedAssets: new Set(rceLogs.map(log => log.edgeHost).filter(h => h)).size,
-      avgScore: calculateValidAvgScore(rceLogs, 'wafRCEScore')  // ✅ 只計算有效分數
+      affectedAssets: this.groupByZoneName(rceLogs),
+      avgScore: calculateValidAvgScore(rceLogs, 'wafRCEScore')
     };
   }
   
@@ -322,7 +517,7 @@ class CloudflareWAFRiskService {
     return Array.from(found).slice(0, 15);
   }
   
-  // 生成 AI 分析 Prompt（基於真實資料 - 升級版）
+  // 生成 AI 分析 Prompt（基於新的判斷流程）
   generateAIPrompt(analysisData) {
     const {
       sqlInjection,
@@ -337,34 +532,61 @@ class CloudflareWAFRiskService {
       timeRange
     } = analysisData;
 
-    // ============================
-    // 🔥 關鍵改變：動態構建攻擊統計
-    // ============================
-    
+    // 格式化時間（台灣時區 UTC+8）
+    const formatTime = (isoString) => {
+      return new Date(isoString).toLocaleString('zh-TW', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: 'Asia/Taipei'
+      });
+    };
+
+    // 動態構建攻擊統計
     const attackSections = [];
 
-    // 只添加檢測次數 > 0 的攻擊類型
+    // SQL 注入
     if (sqlInjection.count > 0) {
+      const blockedInfo = sqlInjection.blocked > 0 ? 
+        `\n   - 已阻擋: ${sqlInjection.blocked} 次（低風險，已成功防禦）` : '';
+      const unblockedInfo = sqlInjection.unblocked > 0 ?
+        `\n   - 未阻擋: ${sqlInjection.unblocked} 次（⚠️ 高風險，需要立即處理）` : '';
+      
       attackSections.push({
         type: 'SQL 注入攻擊',
         data: sqlInjection,
-        description: 'WAFSQLiAttackScore <= 50 或 SecurityRule 包含 "sql"'
+        description: `WAFSQLiAttackScore < 20 或 SecurityRule 包含 "sql"${blockedInfo}${unblockedInfo}`
       });
     }
 
+    // XSS
     if (xssAttacks.count > 0) {
+      const blockedInfo = xssAttacks.blocked > 0 ? 
+        `\n   - 已阻擋: ${xssAttacks.blocked} 次（低風險）` : '';
+      const unblockedInfo = xssAttacks.unblocked > 0 ?
+        `\n   - 未阻擋: ${xssAttacks.unblocked} 次（⚠️ 高風險）` : '';
+      
       attackSections.push({
         type: 'XSS 跨站腳本攻擊',
         data: xssAttacks,
-        description: 'WAFXSSAttackScore <= 50 或 SecurityRule 包含 "xss"'
+        description: `WAFXSSAttackScore < 20 或 SecurityRule 包含 "xss"${blockedInfo}${unblockedInfo}`
       });
     }
 
+    // RCE
     if (rceAttacks.count > 0) {
+      const blockedInfo = rceAttacks.blocked > 0 ? 
+        `\n   - 已阻擋: ${rceAttacks.blocked} 次（低風險）` : '';
+      const unblockedInfo = rceAttacks.unblocked > 0 ?
+        `\n   - 未阻擋: ${rceAttacks.unblocked} 次（⚠️ 高風險）` : '';
+      
       attackSections.push({
         type: 'RCE 遠程代碼執行攻擊',
         data: rceAttacks,
-        description: 'WAFRCEAttackScore <= 50 或 SecurityRule 包含 "rce"'
+        description: `WAFRCEAttackScore < 20 或 SecurityRule 包含 "rce"${blockedInfo}${unblockedInfo}`
       });
     }
 
@@ -380,7 +602,7 @@ class CloudflareWAFRiskService {
       attackSections.push({
         type: '路徑遍歷攻擊',
         data: pathTraversal,
-        description: 'URI 包含 "../", "..\\\\", "%2e%2e" 或敏感檔案路徑'
+        description: 'URI 包含 "../", "..\\\\" 或敏感檔案路徑'
       });
     }
 
@@ -392,19 +614,16 @@ class CloudflareWAFRiskService {
       });
     }
 
-    // ============================
     // 構建攻擊統計文字
-    // ============================
-    
     let attackStatisticsText = '';
     
     if (attackSections.length === 0) {
       attackStatisticsText = `
 **未檢測到任何安全威脅**
 
-在指定時間範圍內，經過 Cloudflare WAF 的完整分析後，未檢測到任何 SQL 注入、XSS、RCE、路徑遍歷攻擊或異常機器人流量。所有請求均通過安全檢查。
+在指定時間範圍內，未檢測到任何攻擊行為。
 
-⚠️ **重要**：由於沒有檢測到任何攻擊，請輸出空的 risks 陣列：
+⚠️ **重要**：請輸出空的 risks 陣列：
 \`\`\`json
 {
   "risks": []
@@ -415,63 +634,87 @@ class CloudflareWAFRiskService {
       attackStatisticsText = attackSections.map((section, index) => {
         const { type, data, description } = section;
         
+        // 格式化受影響資產
+        let assetsInfo = '';
+        if (data.affectedAssets && Array.isArray(data.affectedAssets)) {
+          const top3Zones = data.affectedAssets.slice(0, 3);
+          assetsInfo = top3Zones.map(zone => 
+            `${zone.zoneName} (${zone.attackCount}次攻擊，${zone.blockedCount}次已阻擋，${zone.unblockedCount}次未阻擋)`
+          ).join(', ');
+        }
+        
         return `
 ${index + 1}. **${type}**
    - 檢測方式: ${description}
-   - 檢測次數: ${data.count}
-   ${data.highRisk !== undefined ? `- 高風險 (WAF分數 1-20): ${data.highRisk}` : ''}
+   - 總檢測次數: ${data.count}
+   ${data.blocked !== undefined ? `- 已阻擋: ${data.blocked} 次` : ''}
+   ${data.unblocked !== undefined ? `- 未阻擋: ${data.unblocked} 次` : ''}
+   ${data.highRisk !== undefined ? `- 高風險 (WAF分數 < 20): ${data.highRisk}` : ''}
    ${data.avgScore !== undefined && data.avgScore !== 'N/A' ? `- 平均 WAF 分數: ${data.avgScore}` : ''}
-   - 受影響資產: ${data.affectedAssets}
-   - Top 5 來源IP: ${data.topIPs ? data.topIPs.slice(0, 5).map(ip => `${ip.item} (${ip.count}次)`).join(', ') : '無'}
-   - Top 5 來源國家: ${data.topCountries ? data.topCountries.map(c => `${c.item} (${c.count}次)`).join(', ') : '無'}
+   ${assetsInfo ? `- 受影響資產 Top 3: ${assetsInfo}` : ''}
+   ${data.topIPs ? `- Top 5 來源IP: ${data.topIPs.slice(0, 5).map(ip => `${ip.item} (${ip.count}次, ${ip.country || '未知'})`).join(', ')}` : ''}
+   ${data.topCountries ? `- Top 5 來源國家: ${data.topCountries.map(c => `${c.item} (${c.count}次)`).join(', ')}` : ''}
    ${data.topTargets ? `- Top 5 攻擊目標: ${data.topTargets.slice(0, 5).map(t => `${t.item} (${t.count}次)`).join(', ')}` : ''}
-   ${data.sensitiveFiles ? `- 敏感檔案探測: ${data.sensitiveFiles.slice(0, 5).join(', ')}` : ''}
 `.trim();
       }).join('\n\n');
     }
 
-    // ============================
     // 生成完整的 Prompt 模板
-    // ============================
-    
     const promptTemplate = `
 你是一位資深的網路安全分析專家，專精於 Cloudflare WAF 日誌分析和威脅識別。
 
 ### 【任務說明】
 
-請根據以下 Cloudflare WAF 日誌數據，**自動識別並分類所有攻擊類型**，生成完整的風險評估報告。
-
-**重要：請不要使用預設的攻擊類型清單。所有攻擊類型都應該從日誌數據中自動識別。**
+請根據以下 Cloudflare WAF 日誌數據，**基於新的攻擊判斷流程**生成完整的風險評估報告。
 
 ---
 
 ### 【資料來源】
 
 - **索引名稱**: ${this.elkConfig.index}
-- **時間範圍**: ${timeRange.start} ~ ${timeRange.end}
+- **分析時間範圍（台灣時間 UTC+8）**: 
+  - 開始: ${formatTime(timeRange.start)}
+  - 結束: ${formatTime(timeRange.end)}
 - **總日誌數**: ${totalEvents.toLocaleString()} 筆
-- **分析時間**: ${new Date().toISOString()}
+- **分析時間**: ${formatTime(new Date().toISOString())}
 
 ---
 
-### 【Cloudflare WAF 攻擊分數系統（官方標準）】
+### 【Cloudflare 攻擊判斷流程（重要）】
 
-**分數範圍**: 1-99（分數越低越危險）
+本次分析採用多層判斷架構：
 
-- **1-20**: Attack（攻擊） - 幾乎確定是惡意攻擊
-- **21-50**: Likely Attack（可能攻擊） - 可能是攻擊，但此範圍容易誤報
-- **51-80**: Likely Clean（可能正常） - 可能是正常流量
-- **81-99**: Clean（正常） - 很可能是正常流量
-- **100 或 0**: Unscored（未評分） - WAF 沒有評分此請求
+**第一層：SecurityAction 分類**
+1. **block / connectionClose** → 已阻擋攻擊（低風險）
+   - 風險等級: 低
+   - AI 分析要求: 僅提供簡短摘要
+   
+2. **log** → 需要進一步判斷（依據 WAF Score 和 URI/UA）
+   - WAF Score < 20 → 確定攻擊（高風險）
+   - WAF Score >= 20 → 檢查 URI/UA 是否符合 OWASP TOP 10 攻擊模式
+   
+3. **challenge / jschallenge / managedChallenge** → 挑戰中（中風險）
+   - 風險等級: 中
+   - AI 分析要求: 持續監控
+   
+4. **rateLimit / l7ddos** → 流量限制（中風險）
+   - 風險等級: 中
+   - AI 分析要求: 簡短摘要
 
-**重要規則**:
-- 分數 0 或 100 = 未評分，**不代表攻擊**，已自動排除
-- 只有分數 1-99 才是有效的評分結果
-- 所有內部 Cloudflare 端點（\`/cdn-cgi/*\`）已自動過濾
+**第二層：WAF Attack Score**
+- **< 20**: 幾乎確定是攻擊（Attack 級別）
+- **21-50**: 可能攻擊（Likely Attack 級別，容易誤報）
+- **51-80**: 可能正常（Likely Clean 級別）
+- **81-99**: 很可能正常（Clean 級別）
+- **0 或 100**: 未評分（已自動排除）
+
+**第三層：URI / User-Agent 判斷**
+- 基於 OWASP TOP 10 2021 攻擊模式庫
+- 檢查 SecurityRuleDescription 是否包含 "log" 字眼
 
 ---
 
-### 【攻擊統計（基於真實 Cloudflare 日誌）】
+### 【攻擊統計（基於新的判斷流程）】
 
 ${attackStatisticsText}
 
@@ -486,23 +729,6 @@ ${attackStatisticsText}
 
 ---
 
-### 【OWASP TOP 10 2021 分類參考】
-
-在識別攻擊類型時，請參考 OWASP TOP 10 2021 分類：
-
-1. **A01:2021 – Broken Access Control** (存取控制失效)
-2. **A02:2021 – Cryptographic Failures** (加密機制失效)
-3. **A03:2021 – Injection** (注入攻擊) ← SQL 注入、XSS、命令注入
-4. **A04:2021 – Insecure Design** (不安全設計)
-5. **A05:2021 – Security Misconfiguration** (安全配置錯誤)
-6. **A06:2021 – Vulnerable and Outdated Components** (危險或過舊的元件)
-7. **A07:2021 – Identification and Authentication Failures** (認證及驗證機制失效)
-8. **A08:2021 – Software and Data Integrity Failures** (軟體及資料完整性失效)
-9. **A09:2021 – Security Logging and Monitoring Failures** (資安記錄及監控失效)
-10. **A10:2021 – Server-Side Request Forgery (SSRF)** (伺服器端請求偽造)
-
----
-
 ### 【輸出格式要求】
 
 請生成 **嚴格的 JSON 格式** 風險報告：
@@ -511,17 +737,17 @@ ${attackStatisticsText}
 {
   "risks": [
     {
-      "id": "攻擊類型-唯一識別碼-時間戳",
-      "title": "攻擊標題（簡潔明確）",
+      "id": "攻擊類型-唯一識別碼",
+      "title": "攻擊標題",
       "severity": "critical | high | medium | low",
-      "openIssues": 檢測次數（數字）,
-      "resolvedIssues": 0,
-      "affectedAssets": 受影響的唯一主機名稱數量（數字）,
-      "tags": ["Exploit In Wild", "Internet Exposed", "Confirmed Exploitable"],
-      "description": "詳細描述（200-300字）",
-      "aiInsight": "AI 深度分析（100-150字），必須包含具體數字、WAF分數、來源、目標、建議",
-      "createdDate": "Apr 8, 2025",
-      "updatedDate": "Apr 9, 2025",
+      "openIssues": 未阻擋的攻擊次數,
+      "resolvedIssues": 已阻擋的攻擊次數,
+      "affectedAssets": 受影響資產數量,
+      "tags": ["標籤陣列"],
+      "description": "詳細描述",
+      "aiInsight": "AI 深度分析（必須包含具體數字、時間範圍、WAF 分數、來源、目標）",
+      "createdDate": "${formatTime(timeRange.start)}",
+      "updatedDate": "${formatTime(timeRange.end)}",
       "exploitInWild": true | false,
       "internetExposed": true,
       "confirmedExploitable": true | false,
@@ -529,7 +755,7 @@ ${attackStatisticsText}
       "recommendations": [
         {
           "title": "建議標題",
-          "description": "建議描述（150-200字）",
+          "description": "詳細建議（150-200字）",
           "priority": "high | medium | low"
         }
       ]
@@ -542,13 +768,27 @@ ${attackStatisticsText}
 
 ### 【輸出規則】
 
-1. ⚠️ **關鍵規則**：只生成上面「攻擊統計」中明確列出的攻擊類型
-2. ⚠️ **絕對禁止**：不要生成任何在「攻擊統計」中未列出的攻擊類型
-3. ⚠️ **嚴格要求**：如果某個攻擊類型的檢測次數為 0，該類型不會出現在「攻擊統計」中，也絕對不要在 risks 中生成
-4. ⚠️ **CVE 編號規則**：將 cveId 設為 null（系統無法從日誌準確推導 CVE）
-5. 每個風險至少提供 2-3 個具體建議
-6. aiInsight 必須包含具體數字、WAF 分數、Top 來源、Top 目標
-7. 描述要具體提到檢測到的攻擊特徵和 OWASP 分類
+1. ⚠️ **已阻擋 vs 未阻擋**：
+   - 已阻擋（block）：severity = "low"，openIssues = 0，resolvedIssues = 已阻擋次數
+   - 未阻擋（log）：severity = "critical" 或 "high"，openIssues = 未阻擋次數
+
+2. ⚠️ **時間格式**：
+   - createdDate 和 updatedDate 必須使用日誌實際時間範圍
+   - 格式：${formatTime(timeRange.start)} ~ ${formatTime(timeRange.end)}
+
+3. ⚠️ **AI Insight 必須包含**：
+   - 時間範圍（台灣時間）
+   - 總攻擊次數
+   - 已阻擋 vs 未阻擋次數
+   - WAF 分數統計
+   - Top 5 來源 IP 和國家
+   - 受影響資產
+
+4. ⚠️ **建議（Recommendations）**：
+   - 針對未阻擋的攻擊：提供具體的 SOP 步驟
+   - 針對已阻擋的攻擊：建議持續監控
+
+5. ⚠️ **CVE 編號**：一律設為 null
 
 ---
 
@@ -561,7 +801,20 @@ ${attackStatisticsText}
   // 生成 Fallback 風險資料（AI 解析失敗時使用）
   generateFallbackRisks(analysisData) {
     const risks = [];
-    const { sqlInjection, xssAttacks, rceAttacks, botTraffic, pathTraversal, abnormalUA, assetAnalysis } = analysisData;
+    const { sqlInjection, xssAttacks, rceAttacks, botTraffic, pathTraversal, abnormalUA, assetAnalysis, timeRange } = analysisData;
+    
+    // 格式化時間（使用日誌實際時間範圍，台灣時區 UTC+8）
+    const formatDate = (isoString) => {
+      const date = new Date(isoString);
+      return date.toLocaleDateString('zh-TW', { 
+        year: 'numeric', 
+        month: 'short', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Taipei'
+      });
+    };
     
     // 根據實際資料生成基本風險項目
     if (sqlInjection.count > 0) {
@@ -574,15 +827,16 @@ ${attackStatisticsText}
         severity: sqlInjection.highRisk > 50 ? 'critical' : sqlInjection.count > 100 ? 'high' : 'medium',
         openIssues: sqlInjection.count,
         resolvedIssues: 0,
-        affectedAssets: sqlInjection.affectedAssets,
+        affectedAssets: sqlInjection.affectedAssets?.length || 0,
         tags: sqlInjection.highRisk > 0 ? ['Internet Exposed', 'Confirmed Exploitable'] : ['Internet Exposed'],
-        description: `檢測到 ${sqlInjection.count} 次 SQL 注入攻擊嘗試，其中 ${sqlInjection.highRisk} 次為高風險攻擊（WAF分數<10）。主要來源國家：${sqlInjection.topCountries.slice(0, 3).map(c => c.item).join('、')}。`,
-        aiInsight: `在過去 24 小時內檢測到 ${sqlInjection.count} 次 SQL 注入嘗試（已排除 Cloudflare 內部端點和未評分請求），其中 ${sqlInjection.highRisk} 次屬於高風險級別（WAF 分數 1-20，符合 Cloudflare 官方定義的 Attack 級別）。主要攻擊來自 ${topCountry?.item || '未知'}（${topCountry?.count || 0} 次），Top 攻擊 IP 為 ${topIP?.item || '未知'}（${topIP?.count || 0} 次）。共影響 ${sqlInjection.affectedAssets} 個資產，平均 WAF 分數為 ${sqlInjection.avgScore}${sqlInjection.avgScore <= 20 ? '（Attack 級別）' : sqlInjection.avgScore <= 50 ? '（Likely Attack 級別，但可能有誤報）' : '（Likely Clean/Clean 級別）'}。建議立即檢查受影響端點的 WAF 規則並加強監控。`,
-        createdDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        description: `檢測到 ${sqlInjection.count} 次 SQL 注入攻擊嘗試，其中 ${sqlInjection.blocked || 0} 次已被阻擋，${sqlInjection.unblocked || 0} 次未被阻擋（需要立即處理）。主要來源國家：${sqlInjection.topCountries.slice(0, 3).map(c => c.item).join('、')}。`,
+        aiInsight: `在時間範圍 ${formatDate(timeRange.start)} ~ ${formatDate(timeRange.end)} 內檢測到 ${sqlInjection.count} 次 SQL 注入嘗試，其中 ${sqlInjection.highRisk} 次屬於高風險級別（WAF 分數 < 20）。已阻擋 ${sqlInjection.blocked || 0} 次，未阻擋 ${sqlInjection.unblocked || 0} 次。主要攻擊來自 ${topCountry?.item || '未知'}（${topCountry?.count || 0} 次），Top 攻擊 IP 為 ${topIP?.item || '未知'}（${topIP?.count || 0} 次，來自 ${topIP?.country || '未知'}）。平均 WAF 分數為 ${sqlInjection.avgScore}。建議立即檢查受影響端點並封鎖攻擊來源。`,
+        createdDate: formatDate(timeRange.start),
+        updatedDate: formatDate(timeRange.end),
         exploitInWild: sqlInjection.highRisk > 0,
         internetExposed: true,
         confirmedExploitable: sqlInjection.highRisk > 0,
+        cveId: null,
         recommendations: [
           {
             title: '封鎖攻擊來源 IP',
@@ -591,7 +845,7 @@ ${attackStatisticsText}
           },
           {
             title: '強化輸入驗證與參數檢查',
-            description: '對所有輸入參數實施嚴格的白名單檢查，並使用參數化查詢防止 SQL 注入。在 Cloudflare 中使用 Custom Rules 配置 HTTP Headers 驗證（如 X-CSRF-Token）和 Cookie 驗證（如 Session Cookie），限制敏感 API 端點的訪問。也可以使用 HMAC Token 驗證（is_timed_hmac_valid_v0 函數）提供更強的保護。',
+            description: '對所有輸入參數實施嚴格的白名單檢查，並使用參數化查詢防止 SQL 注入。在 Cloudflare 中使用 Custom Rules 配置 HTTP Headers 驗證（如 X-CSRF-Token）和 Cookie 驗證（如 Session Cookie），限制敏感 API 端點的訪問。',
             priority: 'high'
           },
           {
@@ -613,15 +867,16 @@ ${attackStatisticsText}
         severity: xssAttacks.highRisk > 30 ? 'high' : 'medium',
         openIssues: xssAttacks.count,
         resolvedIssues: 0,
-        affectedAssets: xssAttacks.affectedAssets,
+        affectedAssets: xssAttacks.affectedAssets?.length || 0,
         tags: ['Internet Exposed', 'Confirmed Exploitable'],
-        description: `檢測到 ${xssAttacks.count} 次跨站腳本攻擊嘗試。`,
-        aiInsight: `在過去 24 小時內檢測到 ${xssAttacks.count} 次 XSS 攻擊嘗試（已排除 Cloudflare 內部端點和未評分請求），其中 ${xssAttacks.highRisk} 次屬於高風險級別（WAF 分數 1-20，符合 Cloudflare 官方定義的 Attack 級別）。主要攻擊來自 ${topCountry?.item || '未知'}（${topCountry?.count || 0} 次），Top IP 為 ${topIP?.item || '未知'}。共影響 ${xssAttacks.affectedAssets} 個資產，平均 WAF 分數為 ${xssAttacks.avgScore}${xssAttacks.avgScore <= 20 ? '（Attack 級別）' : xssAttacks.avgScore <= 50 ? '（Likely Attack 級別）' : '（Likely Clean/Clean 級別）'}。建議立即啟用 CSP 並檢查輸入驗證機制。`,
-        createdDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        description: `檢測到 ${xssAttacks.count} 次跨站腳本攻擊嘗試，其中 ${xssAttacks.blocked || 0} 次已被阻擋，${xssAttacks.unblocked || 0} 次未被阻擋。`,
+        aiInsight: `在時間範圍 ${formatDate(timeRange.start)} ~ ${formatDate(timeRange.end)} 內檢測到 ${xssAttacks.count} 次 XSS 攻擊嘗試，其中 ${xssAttacks.highRisk} 次屬於高風險級別（WAF 分數 < 20）。已阻擋 ${xssAttacks.blocked || 0} 次，未阻擋 ${xssAttacks.unblocked || 0} 次。主要攻擊來自 ${topCountry?.item || '未知'}（${topCountry?.count || 0} 次），Top IP 為 ${topIP?.item || '未知'}（來自 ${topIP?.country || '未知'}）。平均 WAF 分數為 ${xssAttacks.avgScore}。建議立即啟用 CSP 並檢查輸入驗證機制。`,
+        createdDate: formatDate(timeRange.start),
+        updatedDate: formatDate(timeRange.end),
         exploitInWild: false,
         internetExposed: true,
         confirmedExploitable: xssAttacks.highRisk > 0,
+        cveId: null,
         recommendations: [
           {
             title: '封鎖攻擊來源 IP',
@@ -652,11 +907,13 @@ ${attackStatisticsText}
         affectedAssets: botTraffic.affectedAssets,
         tags: ['Internet Exposed'],
         description: `檢測到 ${botTraffic.count} 次惡意機器人流量。`,
-        createdDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        updatedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        aiInsight: `在時間範圍 ${formatDate(timeRange.start)} ~ ${formatDate(timeRange.end)} 內檢測到大量機器人流量，建議啟用 Cloudflare Bot Management 進行防護。`,
+        createdDate: formatDate(timeRange.start),
+        updatedDate: formatDate(timeRange.end),
         exploitInWild: false,
         internetExposed: true,
         confirmedExploitable: false,
+        cveId: null,
         recommendations: [
           {
             title: '啟用 Cloudflare Bot Management',
@@ -668,6 +925,95 @@ ${attackStatisticsText}
     }
     
     return { risks };
+  }
+  
+  // 按 ZoneName 分組受影響資產（新增）
+  groupByZoneName(logs) {
+    const zoneMap = new Map();
+    
+    logs.forEach(log => {
+      const zoneName = log.zoneName || log.edgeHost || 'Unknown';
+      const uri = log.requestURI || '/';
+      
+      if (!zoneMap.has(zoneName)) {
+        zoneMap.set(zoneName, {
+          zoneName: zoneName,
+          attackCount: 0,
+          uniqueIPs: new Set(),
+          targetURIs: new Set(),
+          blockedCount: 0,
+          unblockedCount: 0
+        });
+      }
+      
+      const zone = zoneMap.get(zoneName);
+      const analysis = analyzeThreatLevel(log);
+      
+      zone.attackCount++;
+      zone.uniqueIPs.add(log.clientIP);
+      zone.targetURIs.add(uri);
+      
+      if (analysis.isBlocked) {
+        zone.blockedCount++;
+      } else {
+        zone.unblockedCount++;
+      }
+    });
+    
+    // 轉換為陣列並排序
+    return Array.from(zoneMap.values())
+      .map(zone => ({
+        zoneName: zone.zoneName,
+        attackCount: zone.attackCount,
+        blockedCount: zone.blockedCount,
+        unblockedCount: zone.unblockedCount,
+        uniqueIPs: zone.uniqueIPs.size,
+        targetURIs: Array.from(zone.targetURIs).slice(0, 10)
+      }))
+      .sort((a, b) => b.attackCount - a.attackCount);
+  }
+  
+  // 獲取 Top IP 的詳細統計（包含國家）（新增）
+  getTopIPsWithCountry(logs, n = 5) {
+    const ipMap = new Map();
+    
+    logs.forEach(log => {
+      const ip = log.clientIP;
+      const country = log.clientCountry || 'Unknown';
+      
+      if (!ip) return;
+      
+      if (!ipMap.has(ip)) {
+        ipMap.set(ip, {
+          ip: ip,
+          count: 0,
+          country: country,
+          targetURIs: new Set(),
+          attackTypes: new Set()
+        });
+      }
+      
+      const ipData = ipMap.get(ip);
+      ipData.count++;
+      ipData.targetURIs.add(log.requestURI);
+      
+      // 識別攻擊類型
+      const analysis = analyzeThreatLevel(log);
+      if (analysis.attackType) {
+        ipData.attackTypes.add(analysis.attackType);
+      }
+    });
+    
+    return Array.from(ipMap.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, n)
+      .map(ipData => ({
+        item: ipData.ip,  // 保持與 getTopN 格式一致
+        count: ipData.count,
+        country: ipData.country,
+        targetURIs: Array.from(ipData.targetURIs).slice(0, 5),
+        attackTypes: Array.from(ipData.attackTypes)
+      }));
   }
   
   // 工具方法：取得 Top N
