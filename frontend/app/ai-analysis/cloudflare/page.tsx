@@ -366,18 +366,18 @@ export default function CloudflareAIAnalysisPage() {
   const categoryStats = {
     high: {
       count: risksByCategory.high.length,
-      openIssues: risksByCategory.high.reduce((sum, r) => sum + r.openIssues, 0),
-      affectedAssets: risksByCategory.high.reduce((sum, r) => sum + r.affectedAssets, 0),
+      openIssues: risksByCategory.high.reduce((sum, r) => sum + (r.openIssues || 0), 0),
+      affectedAssets: risksByCategory.high.reduce((sum, r) => sum + (r.affectedAssets || 0), 0),
     },
     medium: {
       count: risksByCategory.medium.length,
-      openIssues: risksByCategory.medium.reduce((sum, r) => sum + r.openIssues, 0),
-      affectedAssets: risksByCategory.medium.reduce((sum, r) => sum + r.affectedAssets, 0),
+      openIssues: risksByCategory.medium.reduce((sum, r) => sum + (r.openIssues || 0), 0),
+      affectedAssets: risksByCategory.medium.reduce((sum, r) => sum + (r.affectedAssets || 0), 0),
     },
     low: {
       count: risksByCategory.low.length,
-      openIssues: risksByCategory.low.reduce((sum, r) => sum + r.openIssues, 0),
-      affectedAssets: risksByCategory.low.reduce((sum, r) => sum + r.affectedAssets, 0),
+      openIssues: risksByCategory.low.reduce((sum, r) => sum + (r.openIssues || 0), 0),
+      affectedAssets: risksByCategory.low.reduce((sum, r) => sum + (r.affectedAssets || 0), 0),
     },
   }
 
@@ -432,9 +432,9 @@ export default function CloudflareAIAnalysisPage() {
     }
   }
 
-  const totalOpenIssues = wafRisks.reduce((sum, risk) => sum + risk.openIssues, 0)
-  const totalResolvedIssues = wafRisks.reduce((sum, risk) => sum + risk.resolvedIssues, 0)
-  const totalAffectedAssets = wafRisks.reduce((sum, risk) => sum + risk.affectedAssets, 0)
+  const totalOpenIssues = wafRisks.reduce((sum, risk) => sum + (risk.openIssues || 0), 0)
+  const totalResolvedIssues = wafRisks.reduce((sum, risk) => sum + (risk.resolvedIssues || 0), 0)
+  const totalAffectedAssets = wafRisks.reduce((sum, risk) => sum + (risk.affectedAssets || 0), 0)
 
   // 點擊「查看操作步驟」按鈕時的處理
   const handleExecuteAction = async (
@@ -1272,7 +1272,7 @@ export default function CloudflareAIAnalysisPage() {
                           </div>
                           <h3 className="text-xl font-semibold text-white mb-3">{assessment.title}</h3>
                           <div className="flex flex-wrap gap-2">
-                            {assessment.tags.map((tag, idx) => (
+                            {(assessment.tags || []).map((tag, idx) => (
                               <Badge
                                 key={idx}
                                 variant="outline"
