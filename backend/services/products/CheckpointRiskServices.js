@@ -1060,8 +1060,8 @@ ${JSON.stringify(analysisData, null, 2)}
 
 如果上方有列出「VPN 用戶存取問題」，請**務必**在分析報告中：
 
-1. **獨立列出一個風險項目**，類別為 `VPN_POLICY_ISSUE`，嚴重程度為 `medium`
-2. **明確標示這不是攻擊**，設定 `isAttack: false`
+1. **獨立列出一個風險項目**，類別為 \`VPN_POLICY_ISSUE\`，嚴重程度為 \`medium\`
+2. **明確標示這不是攻擊**，設定 \`isAttack: false\`
 3. **列出所有受影響的 VPN 用戶**，包含：
    - 用戶名稱 (userName)
    - IP 地址
