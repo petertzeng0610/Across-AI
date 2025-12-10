@@ -92,9 +92,9 @@ module.exports = {
     ollama: {
       name: 'Ollama (Local)',
       requiresApiKey: false,
-      defaultModel: 'gpt-oss:20b',
+      defaultModel: 'twister_llama33:latest',
       models: [
-        'gpt-oss:20b',
+        'twister_llama33:latest',
         'llama3:8b',
         'mistral:7b'
       ]

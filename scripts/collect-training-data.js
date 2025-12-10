@@ -320,7 +320,7 @@ function showUsage() {
     --product=f5 \\
     --count=5 \\
     --aiProvider=ollama \\
-    --model=gpt-oss:20b
+    --model=twister_llama33:latest
 
 支援的產品:
   - cloudflare  Cloudflare WAF 分析
